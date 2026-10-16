@@ -1,0 +1,312 @@
+"""Dialos HTTP server: static UI, sessions, models, streaming chat.
+
+Security model:
+  * Sessions are an HttpOnly, SameSite=Lax cookie holding a random token.
+  * State-changing requests must be application/json and, when the browser
+    sends an Origin header, that origin must match the Host (CSRF defence).
+  * Responses carry a strict Content-Security-Policy; the UI renders model
+    output with textContent only.
+  * mode=solo with auth.provider=none identifies everyone as the local user,
+    which is only allowed on a loopback bind (enforced by config.validate).
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import threading
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+from . import backends, config as cfgmod
+from .auth_local import AuthError, Identity, LocalAuth
+
+STATIC = Path(__file__).parent / "static"
+TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+         ".css": "text/css; charset=utf-8"}
+COOKIE = "dialos_session"
+MAX_BODY = 8 * 1024 * 1024
+MAX_CONTENT = 200_000
+MAX_IMAGES = 8
+CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+       "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+SOLO_USER = Identity("local", "You", "", "admin")
+
+
+class App:
+    def __init__(self, cfg, backend=None):
+        self.cfg = cfg
+        self._backend = backend
+        self._lock = threading.Lock()
+        self.local = None
+        if cfg.auth.provider == "local":
+            self.local = LocalAuth(str(cfg.data_path()))
+        elif cfg.auth.provider != "none":
+            raise cfgmod.ConfigError(f"auth.provider={cfg.auth.provider!r} is not implemented yet")
+
+    def backend(self):
+        with self._lock:
+            if self._backend is None:
+                b = self.cfg.backend
+                key_env = b.api_key_env
+                self._backend = backends.make(b.kind, b.url, key_env)
+            return self._backend
+
+    def needs_setup(self):
+        return self.local is not None and not self.local.has_users()
+
+
+class Handler(BaseHTTPRequestHandler):
+    app: App = None
+    server_version = "Dialos"
+    sys_version = ""
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+
+    # ---- helpers
+    def _headers_common(self):
+        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Cache-Control", "no-store")
+
+    def _json(self, code, obj, extra=()):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._headers_common()
+        for k, v in extra:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _token(self):
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return ""
+        try:
+            c = SimpleCookie(raw)
+        except Exception:
+            return ""
+        return c[COOKIE].value if COOKIE in c else ""
+
+    def _identity(self):
+        if self.app.cfg.auth.provider == "none":
+            return SOLO_USER
+        return self.app.local.identify(self._token())
+
+    def _cookie(self, value, max_age):
+        parts = [f"{COOKIE}={value}", "Path=/", "HttpOnly", "SameSite=Lax", f"Max-Age={max_age}"]
+        if self.app.cfg.secure_cookies or self.headers.get("X-Forwarded-Proto") == "https":
+            parts.append("Secure")
+        return ("Set-Cookie", "; ".join(parts))
+
+    def _csrf_ok(self):
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return False
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+            return False
+        return True
+
+    def _body(self):
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self._json(411, {"error": "Content-Length required"})
+            return None
+        if n < 0 or n > MAX_BODY:
+            self._json(413, {"error": "request too large"})
+            return None
+        try:
+            obj = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            self._json(400, {"error": "invalid JSON"})
+            return None
+        if not isinstance(obj, dict):
+            self._json(400, {"error": "JSON object expected"})
+            return None
+        return obj
+
+    def _static(self, name):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or Path(name).suffix not in TYPES:
+            return self._json(404, {"error": "not found"})
+        f = STATIC / name
+        if not f.is_file():
+            return self._json(404, {"error": "not found"})
+        body = f.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", TYPES[f.suffix])
+        self.send_header("Content-Length", str(len(body)))
+        self._headers_common()
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---- routing
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html"):
+            return self._static("index.html")
+        if path.startswith("/static/"):
+            return self._static(path[len("/static/"):])
+        if path == "/api/health":
+            return self._json(200, {"ok": True})
+        if path == "/api/me":
+            ident = self._identity()
+            cfg = self.app.cfg
+            out = {"authenticated": ident is not None, "mode": cfg.mode,
+                   "provider": cfg.auth.provider, "needs_setup": self.app.needs_setup(),
+                   "instance_name": cfg.instance_name}
+            if ident:
+                out.update(name=ident.name, email=ident.email, role=ident.role, id=ident.id)
+            return self._json(200, out)
+        if path == "/api/models":
+            if not self._identity():
+                return self._json(401, {"error": "sign in required"})
+            return self._models()
+        self._json(404, {"error": "not found"})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if not self._csrf_ok():
+            return self._json(403, {"error": "request must be same-origin application/json"})
+        body = self._body()
+        if body is None:
+            return
+        if path == "/api/setup":
+            return self._setup(body)
+        if path == "/api/login":
+            return self._login(body)
+        ident = self._identity()
+        if not ident:
+            return self._json(401, {"error": "sign in required"})
+        if path == "/api/logout":
+            if self.app.local:
+                self.app.local.logout(self._token())
+            return self._json(200, {"ok": True}, [self._cookie("", 0)])
+        if path == "/api/chat":
+            return self._chat(body)
+        self._json(404, {"error": "not found"})
+
+    # ---- handlers
+    def _setup(self, body):
+        if not self.app.needs_setup():
+            return self._json(403, {"error": "already set up"})
+        try:
+            self.app.local.create_user(str(body.get("username", "")), str(body.get("password", "")),
+                                       str(body.get("name", "")), str(body.get("email", "")), "admin")
+        except AuthError as e:
+            return self._json(400, {"error": str(e)})
+        self._login(body)
+
+    def _login(self, body):
+        if not self.app.local:
+            return self._json(400, {"error": "this instance has no login"})
+        try:
+            tok = self.app.local.login(str(body.get("username", "")), str(body.get("password", "")))
+        except AuthError as e:
+            return self._json(401, {"error": str(e)})
+        self._json(200, {"ok": True}, [self._cookie(tok, 14 * 24 * 3600)])
+
+    def _allowed(self, names):
+        allow = self.app.cfg.model_allowlist
+        return [n for n in names if n in allow] if allow else list(names)
+
+    def _models(self):
+        try:
+            names = self._allowed(self.app.backend().list_models())
+        except backends.BackendError as e:
+            return self._json(502, {"error": str(e)})
+        self._json(200, {"models": names, "default": self.app.cfg.default_model})
+
+    def _clean_messages(self, raw):
+        if not isinstance(raw, list) or not raw:
+            return None
+        out = []
+        for m in raw:
+            if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+                return None
+            content = m.get("content", "")
+            if not isinstance(content, str) or len(content) > MAX_CONTENT:
+                return None
+            msg = {"role": m["role"], "content": content}
+            imgs = m.get("images")
+            if imgs is not None:
+                if not isinstance(imgs, list) or len(imgs) > MAX_IMAGES or not all(isinstance(i, str) for i in imgs):
+                    return None
+                msg["images"] = imgs
+            out.append(msg)
+        return out
+
+    def _chat(self, body):
+        model = body.get("model")
+        msgs = self._clean_messages(body.get("messages"))
+        allow = self.app.cfg.model_allowlist
+        if not isinstance(model, str) or not model or msgs is None or (allow and model not in allow):
+            return self._json(400, {"error": "invalid model or messages"})
+        if self.app.cfg.system_prompt:
+            msgs = [{"role": "system", "content": self.app.cfg.system_prompt}] + msgs
+        try:
+            stream = self.app.backend().chat_stream(model, msgs, think=bool(body.get("think")))
+            first = next(stream, None)
+        except backends.BackendError as e:
+            return self._json(502, {"error": str(e)})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self._headers_common()
+        self.end_headers()
+        try:
+            def emit(obj):
+                self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
+                self.wfile.flush()
+            chunk = first
+            while chunk is not None:
+                emit({"content": chunk.content, "thinking": chunk.thinking,
+                      "tool_calls": chunk.tool_calls, "done": chunk.done})
+                chunk = next(stream, None)
+        except backends.BackendError as e:
+            try:
+                emit({"error": str(e), "done": True})
+            except OSError:
+                pass
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+def make_server(cfg, backend=None):
+    app = App(cfg, backend)
+    handler = type("BoundHandler", (Handler,), {"app": app})
+    return ThreadingHTTPServer((cfg.bind, cfg.port), handler), app
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="dialos")
+    ap.add_argument("--config", default=os.environ.get("DIALOS_CONFIG"))
+    args = ap.parse_args(argv)
+    try:
+        cfg = cfgmod.load(args.config)
+        srv, app = make_server(cfg)
+    except cfgmod.ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
+    loop = cfg.bind in cfgmod.LOOPBACK
+    print(f"{cfg.instance_name}: mode={cfg.mode} auth={cfg.auth.provider} on http://{cfg.bind}:{srv.server_port}")
+    if cfg.mode == "multi" and not loop and not cfg.secure_cookies:
+        print("warning: multi-user on a network address without secure_cookies; "
+              "serve it over https and set secure_cookies = true", file=sys.stderr)
+    if app.needs_setup():
+        print("no accounts yet: open the page to create the first admin, or run: python -m dialos.cli add NAME --admin")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

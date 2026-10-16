@@ -52,6 +52,7 @@ class Config:
     model_allowlist: list = field(default_factory=list)
     default_model: str = ""
     max_upload_bytes: int = 2 * 1024**3
+    secure_cookies: bool = False
     auth: Auth = field(default_factory=Auth)
     backend: Backend = field(default_factory=Backend)
 
@@ -74,7 +75,7 @@ def validate(cfg: Config) -> Config:
         raise ConfigError(f"auth.provider must be one of {PROVIDERS}")
     if cfg.backend.kind not in BACKENDS:
         raise ConfigError(f"backend.kind must be one of {BACKENDS}")
-    if not 1 <= cfg.port <= 65535:
+    if not 0 <= cfg.port <= 65535:
         raise ConfigError("port out of range")
     if cfg.mode == "multi" and cfg.auth.provider == "none":
         raise ConfigError("mode=multi requires auth.provider = local, oidc or proxy")

@@ -8,6 +8,7 @@ data_dir = "~/.local/share/dialos"
 # model_allowlist = []        # empty = every model the backend reports
 # default_model = ""
 # max_upload_bytes = 2147483648
+# secure_cookies = true       # set when served over https (reverse proxy / tunnel)
 
 [auth]
 provider = "none"             # none | local | oidc | proxy

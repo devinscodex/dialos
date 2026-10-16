@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dialos</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header><strong id="brand">Dialos</strong><span id="who"></span><button id="logout" hidden>Sign out</button></header>
+
+<main id="auth" hidden>
+  <form id="authForm">
+    <h2 id="authTitle">Sign in</h2>
+    <input id="u" placeholder="Username" autocomplete="username" required>
+    <input id="p" type="password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit" id="authBtn">Sign in</button>
+    <p id="authErr" class="err"></p>
+  </form>
+</main>
+
+<main id="chat" hidden>
+  <div class="bar"><select id="model"></select></div>
+  <div id="log"></div>
+  <form id="send">
+    <textarea id="box" rows="2" placeholder="Message"></textarea>
+    <button type="submit">Send</button>
+  </form>
+  <p id="chatErr" class="err"></p>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

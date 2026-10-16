@@ -9,7 +9,9 @@ import hmac
 import os
 import secrets
 import sqlite3
+import threading
 import time
+from functools import wraps
 from dataclasses import dataclass
 
 SCRYPT = dict(n=2**15, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32)
@@ -21,6 +23,14 @@ MIN_PASSWORD = 10
 
 class AuthError(Exception):
     pass
+
+
+def _sync(fn):
+    @wraps(fn)
+    def run(self, *a, **kw):
+        with self._lock:
+            return fn(self, *a, **kw)
+    return run
 
 
 @dataclass
@@ -37,6 +47,7 @@ def _hash(password: str, salt: bytes) -> bytes:
 
 class LocalAuth:
     def __init__(self, data_dir):
+        self._lock = threading.RLock()
         os.makedirs(data_dir, mode=0o700, exist_ok=True)
         self.db = sqlite3.connect(os.path.join(data_dir, "auth.db"), check_same_thread=False)
         self.db.executescript("""
@@ -52,9 +63,11 @@ class LocalAuth:
         """)
         os.chmod(os.path.join(data_dir, "auth.db"), 0o600)
 
+    @_sync
     def has_users(self) -> bool:
         return self.db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
 
+    @_sync
     def create_user(self, username, password, name="", email="", role="user") -> Identity:
         username = username.strip().lower()
         if not username or len(username) > 64:
@@ -80,6 +93,7 @@ class LocalAuth:
         row = self.db.execute("SELECT count, since FROM fails WHERE username=?", (username,)).fetchone()
         return bool(row and row[0] >= MAX_FAILS and time.time() - row[1] < LOCK_SECONDS)
 
+    @_sync
     def login(self, username, password) -> str:
         """Returns a session token, or raises AuthError."""
         username = username.strip().lower()
@@ -105,6 +119,7 @@ class LocalAuth:
         self.db.commit()
         return token
 
+    @_sync
     def identify(self, token) -> Identity | None:
         if not token:
             return None
@@ -117,6 +132,7 @@ class LocalAuth:
             return None
         return Identity(row[0], row[1], row[2], row[3])
 
+    @_sync
     def list_users(self) -> list:
         return [dict(zip(("username", "name", "email", "role", "disabled"), r)) for r in self.db.execute(
             "SELECT username, name, email, role, disabled FROM users ORDER BY created")]
@@ -131,6 +147,7 @@ class LocalAuth:
             raise AuthError("no such user")
         return row
 
+    @_sync
     def set_password(self, username, password):
         if len(password) < MIN_PASSWORD:
             raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
@@ -141,6 +158,7 @@ class LocalAuth:
         self.db.execute("DELETE FROM fails WHERE username=?", (username.strip().lower(),))
         self.db.commit()
 
+    @_sync
     def set_role(self, username, role):
         if role not in ("user", "admin"):
             raise AuthError("invalid role")
@@ -150,6 +168,7 @@ class LocalAuth:
         self.db.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
         self.db.commit()
 
+    @_sync
     def set_disabled(self, username, disabled: bool):
         uid, role, cur = self._get(username)
         if disabled and role == "admin" and not cur and self._admins() <= 1:
@@ -159,6 +178,7 @@ class LocalAuth:
             self.db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         self.db.commit()
 
+    @_sync
     def delete_user(self, username):
         uid, role, disabled = self._get(username)
         if role == "admin" and not disabled and self._admins() <= 1:
@@ -167,6 +187,7 @@ class LocalAuth:
         self.db.execute("DELETE FROM users WHERE id=?", (uid,))
         self.db.commit()
 
+    @_sync
     def logout(self, token):
         self.db.execute("DELETE FROM sessions WHERE tokhash=?",
                         (hashlib.sha256(token.encode()).hexdigest(),))

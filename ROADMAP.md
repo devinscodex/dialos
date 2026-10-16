@@ -6,7 +6,8 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
 - [x] Config layer: `mode = solo|multi`, fail-closed validation
 - [x] Local accounts (scrypt, sessions, lockout) and admin CLI
 - [x] Model backends: Ollama and OpenAI-compatible, auto-detected
-- [ ] HTTP server port: login endpoints, HttpOnly/SameSite/Secure cookies, CSRF
+- [x] HTTP server: login/logout/first-run setup, HttpOnly/SameSite/Secure cookies, CSRF, CSP, streaming chat, model list (minimal UI)
+- [ ] Port the full chat interface (conversations, projects, themes) onto the new server
 - [ ] Mobile layout (single column, drawer sidebar)
 - [ ] Strip instance-specific prompts and tools; move to config
 
