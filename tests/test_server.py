@@ -208,6 +208,10 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Dialos", t)
         self.assertIn("default-src 'self'", r.getheader("Content-Security-Policy"))
         self.assertEqual(r.getheader("X-Content-Type-Options"), "nosniff")
+        csp = r.getheader("Content-Security-Policy")
+        self.assertIn("script-src 'self'", csp)
+        self.assertNotIn("unsafe-inline", csp.split("style-src-attr")[0])
+        self.assertNotIn("script-src 'self' 'unsafe", csp)
         self.assertEqual(c.req("GET", "/static/app.js")[0], 200)
         for bad in ("/static/../server.py", "/static/..%2fserver.py", "/static/config.py", "/static/nope.js"):
             self.assertEqual(c.req("GET", bad)[0], 404, bad)

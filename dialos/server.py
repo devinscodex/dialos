@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import backends, config as cfgmod
+from . import api, backends, config as cfgmod, store
 from .auth_local import AuthError, Identity, LocalAuth
 
 STATIC = Path(__file__).parent / "static"
@@ -31,7 +31,7 @@ COOKIE = "dialos_session"
 MAX_BODY = 8 * 1024 * 1024
 MAX_CONTENT = 200_000
 MAX_IMAGES = 8
-CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 SOLO_USER = Identity("local", "You", "", "admin")
 
@@ -42,6 +42,7 @@ class App:
         self._backend = backend
         self._lock = threading.Lock()
         self.local = None
+        self.store = store.Store(cfg.data_path())
         if cfg.auth.provider == "local":
             self.local = LocalAuth(str(cfg.data_path()))
         elif cfg.auth.provider != "none":
@@ -106,9 +107,9 @@ class Handler(BaseHTTPRequestHandler):
             parts.append("Secure")
         return ("Set-Cookie", "; ".join(parts))
 
-    def _csrf_ok(self):
+    def _csrf_ok(self, need_json=True):
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if ctype != "application/json":
+        if need_json and ctype != "application/json":
             return False
         origin = self.headers.get("Origin")
         if origin and urlparse(origin).netloc != self.headers.get("Host"):
@@ -162,20 +163,27 @@ class Handler(BaseHTTPRequestHandler):
             cfg = self.app.cfg
             out = {"authenticated": ident is not None, "mode": cfg.mode,
                    "provider": cfg.auth.provider, "needs_setup": self.app.needs_setup(),
-                   "instance_name": cfg.instance_name, "model_choice": cfg.model_choice}
+                   "instance_name": cfg.instance_name, "model_choice": cfg.model_choice,
+                   "features": {"files": False}}
             if ident:
-                out.update(name=ident.name, email=ident.email, role=ident.role, id=ident.id)
+                first = (ident.name or "").split()
+                out.update(name=ident.name, email=ident.email, role=ident.role, id=ident.id,
+                           display_name=first[0] if first else ident.name)
             return self._json(200, out)
         if path == "/api/models":
             if not self._identity():
                 return self._json(401, {"error": "sign in required"})
             return self._models()
+        if api.handle(self, "GET", path):
+            return
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
         path = urlparse(self.path).path
         if not self._csrf_ok():
             return self._json(403, {"error": "request must be same-origin application/json"})
+        if api.handle(self, "POST", path):
+            return
         body = self._body()
         if body is None:
             return
@@ -192,6 +200,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True}, [self._cookie("", 0)])
         if path == "/api/chat":
             return self._chat(body)
+        self._json(404, {"error": "not found"})
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if not self._csrf_ok(need_json=False):
+            return self._json(403, {"error": "request must be same-origin"})
+        if api.handle(self, "DELETE", path):
+            return
         self._json(404, {"error": "not found"})
 
     # ---- handlers
@@ -221,12 +237,14 @@ class Handler(BaseHTTPRequestHandler):
     def _models(self):
         cfg = self.app.cfg
         if not cfg.model_choice:
-            return self._json(200, {"models": [cfg.default_model], "default": cfg.default_model})
+            return self._json(200, {"models": [cfg.default_model], "default": cfg.default_model,
+                                    "current": cfg.default_model})
         try:
             names = self._allowed(self.app.backend().list_models())
         except backends.BackendError as e:
             return self._json(502, {"error": str(e)})
-        self._json(200, {"models": names, "default": cfg.default_model})
+        self._json(200, {"models": names, "default": cfg.default_model,
+                         "current": cfg.default_model if cfg.default_model in names else (names[0] if names else "")})
 
     def _clean_messages(self, raw):
         if not isinstance(raw, list) or not raw:

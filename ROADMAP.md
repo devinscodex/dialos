@@ -7,8 +7,8 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
 - [x] Local accounts (scrypt, sessions, lockout) and admin CLI
 - [x] Model backends: Ollama and OpenAI-compatible, auto-detected
 - [x] HTTP server: login/logout/first-run setup, HttpOnly/SameSite/Secure cookies, CSRF, CSP, streaming chat, model list (minimal UI)
-- [ ] Port the full chat interface (conversations, projects, themes) onto the new server
-- [ ] Mobile layout (single column, drawer sidebar)
+- [x] Full chat interface ported: sidebar, conversations, projects (with instructions), themes, settings, markdown, regenerate, phone layout, sign-in screen
+- [x] Per-user conversation and project storage, isolated by account
 - [ ] Strip instance-specific prompts and tools; move to config
 
 ## Auth
@@ -37,6 +37,7 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
 - [ ] Config: `feedback.enabled`, optional notify address
 
 ## Files
+- [ ] Project file upload and browser, attach files to a chat (UI is hidden until the server supports it)
 - [ ] Chunked, streamed upload to disk; per-user quota instead of a fixed 50 MB cap
 - [ ] Local folder connection in the browser (File System Access API,
       Chromium) so files are read on demand without uploading
