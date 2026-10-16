@@ -133,6 +133,10 @@ class LocalAuth:
         return Identity(row[0], row[1], row[2], row[3])
 
     @_sync
+    def id_map(self) -> dict:
+        return dict(self.db.execute("SELECT id, username FROM users"))
+
+    @_sync
     def list_users(self) -> list:
         return [dict(zip(("username", "name", "email", "role", "disabled"), r)) for r in self.db.execute(
             "SELECT username, name, email, role, disabled FROM users ORDER BY created")]

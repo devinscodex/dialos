@@ -399,3 +399,7 @@ body.no-files #chatAttachBtn, body.no-files .files-feature, body.no-files .drop-
 #loginForm button { padding: 10px 12px; border: 0; border-radius: 10px; background: var(--moss-solid); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
 #loginForm button:disabled { opacity: .5; }
 .login-err { color: #c0392b; min-height: 1.3em; margin: 2px 0 0; font-size: .92rem; }
+
+.ctx-meter { padding: 2px 4px 0; font-size: .78rem; color: var(--ink-faint); }
+.ctx-meter.warn { color: #d99a2b; }
+.ctx-meter.over { color: #c0392b; }

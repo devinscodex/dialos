@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 
-from . import backends, store
+from . import backends, context, store
 
 MAX_MESSAGE = 200_000
 MAX_IMAGES = 4
@@ -98,7 +98,7 @@ def _conversations(h, method, conv_id, action):
     if method == "GET" and action is None:
         conv = _load(h, ns, "conversations", conv_id, "conversation")
         if conv:
-            h._json(200, conv)
+            h._json(200, dict(conv, context=conv_context(h.app, st, ns, conv)))
         return True
     if method == "DELETE" and action is None:
         try:
@@ -210,7 +210,7 @@ def _projects(h, method, proj_id, action):
     return True
 
 
-def build_messages(app, st, ns, conv, history):
+def system_messages(app, st, ns, conv):
     system = app.cfg.system_prompt
     if conv.get("project_id"):
         try:
@@ -219,13 +219,35 @@ def build_messages(app, st, ns, conv, history):
             instr = ""
         if instr:
             system = (system + "\n\n" if system else "") + "Project instructions:\n" + instr
-    msgs = [{"role": "system", "content": system}] if system else []
+    return [{"role": "system", "content": system}] if system else []
+
+
+def build_messages(app, st, ns, conv, history):
+    """Returns (messages for the model, context info) or (None, None) if the
+    newest message alone cannot fit the model's window."""
+    sysm = system_messages(app, st, ns, conv)
+    plain = []
     for m in history:
         mm = {"role": m["role"], "content": m["content"]}
         if m.get("images"):
             mm["images"] = [i["data"] for i in m["images"]]
-        msgs.append(mm)
-    return msgs
+        plain.append(mm)
+    fitted = context.fit(sysm, plain, app.cfg.context_tokens)
+    if fitted is None:
+        return None, None
+    kept, info = fitted
+    return sysm + kept, info
+
+
+def conv_context(app, st, ns, conv):
+    sysm = system_messages(app, st, ns, conv)
+    plain = [{"role": m["role"], "content": m["content"], "images": m.get("images")} for m in conv["messages"]]
+    fitted = context.fit(sysm, plain, app.cfg.context_tokens)
+    return fitted[1] if fitted else {"used": 0, "limit": app.cfg.context_tokens, "dropped": 0}
+
+
+def model_options(app):
+    return {"num_ctx": app.cfg.context_tokens} if app.cfg.context_tokens else None
 
 
 def _regenerate(h, st, ns, conv):
@@ -235,14 +257,22 @@ def _regenerate(h, st, ns, conv):
     model = conv.get("model") or cfg.default_model
     if not model or (cfg.model_allowlist and model not in cfg.model_allowlist):
         return h._json(400, {"error": "invalid model"}) or True
-    msgs = build_messages(h.app, st, ns, conv, conv["messages"][:-1])
+    msgs, info = build_messages(h.app, st, ns, conv, conv["messages"][:-1])
+    if msgs is None:
+        return h._json(413, {"error": "the last message is too large for the model's context window"}) or True
     content, thinking = "", ""
+    t0 = time.time()
     try:
-        for chunk in h.app.backend().chat_stream(model, msgs, think=True):
+        for chunk in h.app.backend().chat_stream(model, msgs, options=model_options(h.app), think=h.app.cfg.think):
             content += chunk.content
             thinking += chunk.thinking
     except backends.BackendError as e:
+        h.app.telemetry.event("chat", action="regenerate", user=store.ns_for(h._identity().id), model=model,
+                              status="error", error=str(e)[:200], total_ms=round((time.time() - t0) * 1000))
         return h._json(502, {"error": str(e)}) or True
+    h.app.telemetry.event("chat", action="regenerate", user=store.ns_for(h._identity().id), model=model,
+                          status="ok", total_ms=round((time.time() - t0) * 1000), out_chars=len(content),
+                          ctx_used=info["used"], ctx_limit=info["limit"], dropped=info["dropped"])
     ts = time.time()
     msg = {"role": "assistant", "content": content, "ts": ts}
     if thinking:
@@ -296,7 +326,14 @@ def _chat(h, st, ns, conv, body):
         turn["images"] = images
     conv["messages"].append(turn)
 
-    msgs = build_messages(h.app, st, ns, conv, conv["messages"])
+    msgs, info = build_messages(h.app, st, ns, conv, conv["messages"])
+    if msgs is None:
+        conv["messages"].pop()
+        return h._json(413, {"error": "that message is too large for the model's context window; shorten it"}) or True
+    t_start = time.time()
+    marks = {"first": None, "content": None}
+    stats = {}
+    think = h.app.cfg.think
 
     q = queue.Queue()
     stop = threading.Event()
@@ -304,7 +341,7 @@ def _chat(h, st, ns, conv, body):
     def pump():
         gen = None
         try:
-            gen = h.app.backend().chat_stream(model, msgs, think=True)
+            gen = h.app.backend().chat_stream(model, msgs, options=model_options(h.app), think=think)
             for chunk in gen:
                 if stop.is_set():
                     break
@@ -354,10 +391,16 @@ def _chat(h, st, ns, conv, body):
                     stop.set()
             continue
         if kind == "chunk":
+            if (val.thinking or val.content) and marks["first"] is None:
+                marks["first"] = time.time()
+            if val.stats:
+                stats = val.stats
             if val.thinking:
                 thinking += val.thinking
                 emit({"type": "thinking_delta", "text": val.thinking})
             if val.content:
+                if marks["content"] is None:
+                    marks["content"] = time.time()
                 content += val.content
                 emit({"type": "content_delta", "text": val.content})
             if gone:
@@ -377,8 +420,19 @@ def _chat(h, st, ns, conv, body):
         conv["messages"].append(msg)
     conv["updated"] = ts
     st.save(ns, "conversations", conv)
+    ms = lambda t: round((t - t_start) * 1000) if t else None
+    eval_ms = stats.get("eval_ms")
+    done_tokens = stats.get("completion_tokens")
+    h.app.telemetry.event(
+        "chat", action="chat", user=ns, conv=conv["id"][:8], model=model, think=think,
+        status="error" if error else ("aborted" if gone else "ok"), error=(error or "")[:200] or None,
+        queued_ms=None, ttft_ms=ms(marks["first"]), first_content_ms=ms(marks["content"]), total_ms=ms(ts),
+        ctx_used=info["used"], ctx_limit=info["limit"], dropped=info["dropped"],
+        prompt_tokens=stats.get("prompt_tokens"), completion_tokens=done_tokens, load_ms=stats.get("load_ms"),
+        tok_per_s=round(done_tokens / (eval_ms / 1000), 1) if done_tokens and eval_ms else None,
+        out_chars=len(content), thinking_chars=len(thinking), images=len(images) or None)
     if error:
         emit({"type": "error", "error": error})
     else:
-        emit({"type": "done", "model": model, "title": conv["title"], "ts": ts})
+        emit({"type": "done", "model": model, "title": conv["title"], "ts": ts, "context": info})
     return True

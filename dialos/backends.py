@@ -24,6 +24,7 @@ class Chunk:
     thinking: str = ""
     tool_calls: list = field(default_factory=list)  # [{"name": str, "args": dict}]
     done: bool = False
+    stats: dict = field(default_factory=dict)  # prompt_tokens, completion_tokens, load_ms, eval_ms (when known)
 
 
 def _norm_url(url: str) -> str:
@@ -100,7 +101,12 @@ class OllamaBackend(Backend):
                 m = obj.get("message") or {}
                 calls = [{"name": c["function"]["name"], "args": c["function"].get("arguments") or {}}
                          for c in (m.get("tool_calls") or [])]
-                yield Chunk(m.get("content") or "", m.get("thinking") or "", calls, bool(obj.get("done")))
+                stats = {}
+                if obj.get("done"):
+                    stats = {"prompt_tokens": obj.get("prompt_eval_count"), "completion_tokens": obj.get("eval_count"),
+                             "load_ms": round((obj.get("load_duration") or 0) / 1e6),
+                             "eval_ms": round((obj.get("eval_duration") or 0) / 1e6)}
+                yield Chunk(m.get("content") or "", m.get("thinking") or "", calls, bool(obj.get("done")), stats)
 
 
 def _to_openai_messages(messages):

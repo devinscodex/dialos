@@ -9,6 +9,10 @@ data_dir = "~/.local/share/dialos"
 # default_model = ""
 # model_choice = true         # false: users cannot pick; default_model is always used
 # max_upload_bytes = 2147483648
+# context_tokens = 16384      # the model's window; history is fitted to ~75% of it (0 = send everything)
+# think = true                # ask models to show reasoning
+# log_enabled = true          # operator event log (timings, sizes; never message text)
+# log_dir = ""                # default: <data_dir>/logs
 # secure_cookies = true       # set when served over https (reverse proxy / tunnel)
 
 [auth]

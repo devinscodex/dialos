@@ -54,11 +54,18 @@ class Config:
     model_choice: bool = True
     max_upload_bytes: int = 2 * 1024**3
     secure_cookies: bool = False
+    context_tokens: int = 16384
+    think: bool = True
+    log_enabled: bool = True
+    log_dir: str = ""
     auth: Auth = field(default_factory=Auth)
     backend: Backend = field(default_factory=Backend)
 
     def data_path(self) -> Path:
         return Path(self.data_dir).expanduser()
+
+    def log_path(self) -> Path:
+        return Path(self.log_dir).expanduser() if self.log_dir else self.data_path() / "logs"
 
 
 def _section(raw: dict, name: str, cls):
@@ -84,6 +91,8 @@ def validate(cfg: Config) -> Config:
         raise ConfigError("mode=solo supports auth.provider = none or local")
     if cfg.bind not in LOOPBACK and cfg.auth.provider == "none":
         raise ConfigError("a non-loopback bind needs an auth provider")
+    if cfg.context_tokens != 0 and not 2048 <= cfg.context_tokens <= 2_000_000:
+        raise ConfigError("context_tokens must be 0 (no fitting) or between 2048 and 2000000")
     if not cfg.model_choice and not cfg.default_model:
         raise ConfigError("model_choice = false requires default_model")
     if cfg.auth.provider == "oidc" and not (cfg.auth.oidc_issuer and cfg.auth.oidc_client_id):

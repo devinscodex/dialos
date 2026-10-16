@@ -23,6 +23,12 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
       email, independent of the identity provider, so the assistant knows who
       it is talking to instead of parsing a name from an address
 
+## Operations
+- [x] Context window fitting with a visible meter; full history stays on disk
+- [x] Operator event log (timings, tokens, outcomes, sign-ins; no message text) and `dialos.stats`
+- [ ] Optional summary of dropped history; search tool over saved conversations
+- [ ] Per-chat thinking toggle; request queue with "N ahead" and a cap
+
 ## Settings
 - [ ] About: version number, commit, link to release history
 - [ ] Toggle for the background grid texture

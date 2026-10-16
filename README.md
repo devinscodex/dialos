@@ -27,6 +27,20 @@ the web server and model backends are being ported in.
     python -m dialos.cli disable bob
     python -m dialos.cli delete bob
 
+## Context and logging
+
+The full conversation is always kept on disk. Each request sends the model
+only the system text plus as many recent messages as fit in about 75% of
+`context_tokens`; the page shows a context meter and says when earlier
+messages are saved but outside the model's memory.
+
+Dialos writes one JSON line per chat request and sign-in event to
+`<data_dir>/logs/events.jsonl` (owner-only, rotated at 20 MB). It records
+timings, token counts, model names and outcomes, never message text.
+
+    python -m dialos.stats --days 7
+    python -m dialos.stats --days 1 --raw 20
+
 ## Tests
 
     python -m unittest discover -s tests -t .

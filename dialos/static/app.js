@@ -971,6 +971,20 @@ if (inputBox) {
   });
 }
 
+function updateCtxMeter(c) {
+  const el = document.getElementById('ctxMeter');
+  if (!c || !c.limit) { el.hidden = true; return; }
+  const k = (n) => n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+  let text = `Context ~${k(c.used)} / ${k(c.limit)}`;
+  if (c.dropped > 0) {
+    text += ` \u00b7 ${c.dropped} earlier message${c.dropped === 1 ? ' is' : 's are'} saved but no longer in the model's memory`;
+  }
+  el.textContent = text;
+  el.classList.toggle('warn', c.dropped === 0 && c.used / c.limit > 0.6);
+  el.classList.toggle('over', c.dropped > 0);
+  el.hidden = false;
+}
+
 async function loadConversation(id) {
   if (isMobileView()) document.body.classList.add('sidebar-collapsed');
   try {
@@ -979,6 +993,7 @@ async function loadConversation(id) {
     const conv = await resp.json();
     currentConvId = conv.id;
     currentProjectId = conv.project_id || null;
+    updateCtxMeter(conv.context);
     messagesEl.innerHTML = '';
     if (conv.messages.length === 0) {
       showHero();
@@ -994,6 +1009,7 @@ async function loadConversation(id) {
 }
 
 async function startNewChat() {
+  updateCtxMeter(null);
   currentConvId = null;
   messagesEl.innerHTML = '';
   showHero();
@@ -1092,6 +1108,7 @@ async function sendMessage() {
         } else if (evt.type === 'tool_call') {
           recordToolCalls([{ name: evt.name, args: evt.args, output: evt.output }]);
         } else if (evt.type === 'done') {
+          updateCtxMeter(evt.context);
           const whoEl = pending.querySelector('.who');
           const nameEl = whoEl.querySelector('.msg-name') || whoEl;
           nameEl.textContent = evt.model ? `${APP_NAME} · ${evt.model}` : APP_NAME;

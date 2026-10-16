@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import api, backends, config as cfgmod, store
+from . import api, backends, config as cfgmod, store, telemetry
 from .auth_local import AuthError, Identity, LocalAuth
 
 STATIC = Path(__file__).parent / "static"
@@ -43,6 +43,7 @@ class App:
         self._lock = threading.Lock()
         self.local = None
         self.store = store.Store(cfg.data_path())
+        self.telemetry = telemetry.Telemetry(cfg.log_path(), cfg.log_enabled)
         if cfg.auth.provider == "local":
             self.local = LocalAuth(str(cfg.data_path()))
         elif cfg.auth.provider != "none":
@@ -100,6 +101,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.app.cfg.auth.provider == "none":
             return SOLO_USER
         return self.app.local.identify(self._token())
+
+    def _peer(self):
+        return {"peer": self.client_address[0], "xff": (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip() or None}
 
     def _cookie(self, value, max_age):
         parts = [f"{COOKIE}={value}", "Path=/", "HttpOnly", "SameSite=Lax", f"Max-Age={max_age}"]
@@ -197,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             if self.app.local:
                 self.app.local.logout(self._token())
+            self.app.telemetry.event("auth", action="logout", user_ns=store.ns_for(ident.id), **self._peer())
             return self._json(200, {"ok": True}, [self._cookie("", 0)])
         if path == "/api/chat":
             return self._chat(body)
@@ -219,15 +224,21 @@ class Handler(BaseHTTPRequestHandler):
                                        str(body.get("name", "")), str(body.get("email", "")), "admin")
         except AuthError as e:
             return self._json(400, {"error": str(e)})
+        self.app.telemetry.event("auth", action="setup", user=str(body.get("username", ""))[:64].lower(), **self._peer())
         self._login(body)
 
     def _login(self, body):
         if not self.app.local:
             return self._json(400, {"error": "this instance has no login"})
+        uname = str(body.get("username", "")).strip().lower()[:64]
         try:
-            tok = self.app.local.login(str(body.get("username", "")), str(body.get("password", "")))
+            tok = self.app.local.login(uname, str(body.get("password", "")))
         except AuthError as e:
+            import hashlib
+            self.app.telemetry.event("auth", action="locked" if "too many" in str(e) else "login_fail",
+                                     user_hash=hashlib.sha256(uname.encode()).hexdigest()[:8], **self._peer())
             return self._json(401, {"error": str(e)})
+        self.app.telemetry.event("auth", action="login_ok", user=uname, **self._peer())
         self._json(200, {"ok": True}, [self._cookie(tok, 14 * 24 * 3600)])
 
     def _allowed(self, names):
