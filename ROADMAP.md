@@ -13,7 +13,7 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
 
 ## Auth
 - [ ] Generic OIDC provider (Keycloak, Authentik, Zitadel, Pocket ID, Entra, ...)
-- [ ] Reverse-proxy provider (oauth2-proxy, Authelia, Cloudflare Access)
+- [ ] Reverse-proxy provider (oauth2-proxy, Authelia and similar)
 - [ ] Passkeys (WebAuthn) for local accounts
 - [ ] LDAP bind provider
 - [ ] Admin screen in Settings: users, roles, disable, reset
@@ -22,6 +22,11 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
 - [ ] Real user records (full name, role, department, preferences) keyed by
       email, independent of the identity provider, so the assistant knows who
       it is talking to instead of parsing a name from an address
+
+## Files
+- [x] Chunked uploads (no 50 MB ceiling), per-user quota, PDF/Word/Excel/PowerPoint extraction, optional OCR
+- [x] Model tools to list, read, search and view project files
+- [ ] Resumable uploads after a dropped connection; browser local-folder connection
 
 ## Operations
 - [x] Context window fitting with a visible meter; full history stays on disk

@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 
-from . import backends, context, store
+from . import backends, context, store, tools as tools_mod
 
 MAX_MESSAGE = 200_000
 MAX_IMAGES = 4
@@ -36,7 +36,7 @@ def _summary_conv(c):
 
 
 def _summary_proj(p):
-    return {"id": p["id"], "name": p["name"], "created": p["created"]}
+    return {"id": p["id"], "name": p["name"], "created": p["created"], "has_files": bool(p.get("has_files"))}
 
 
 def handle(h, method, path):
@@ -130,6 +130,13 @@ def _conversations(h, method, conv_id, action):
             except store.NotFound:
                 return h._json(404, {"error": "no such project"}) or True
         conv["project_id"] = pid
+    elif action == "attachment-note":
+        names = body.get("filenames")
+        if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names) or len(names) > 200:
+            return h._json(400, {"error": 'expected {"filenames": ["a.txt", ...]}'}) or True
+        names = [n[:200] for n in names]
+        conv["messages"].append({"role": "user", "ts": time.time(), "attachment": True,
+                                 "content": "\U0001F4CE Attached file" + ("s" if len(names) != 1 else "") + ": " + ", ".join(names)})
     elif action == "truncate":
         try:
             idx = int(body["index"])
@@ -183,6 +190,7 @@ def _projects(h, method, proj_id, action):
             st.delete(ns, "projects", proj_id)
         except store.NotFound:
             return h._json(404, {"error": "no such project"}) or True
+        h.app.files.purge(ns, proj_id)
         for c in st.list(ns, "conversations"):
             if c.get("project_id") == proj_id:
                 c["project_id"] = None
@@ -219,6 +227,13 @@ def system_messages(app, st, ns, conv):
             instr = ""
         if instr:
             system = (system + "\n\n" if system else "") + "Project instructions:\n" + instr
+    pid = conv.get("project_id")
+    if pid and app.cfg.tools and app.files.has_files(ns, pid):
+        top = ", ".join(app.files.top_listing(ns, pid)) or "(empty)"
+        system = (system + "\n\n" if system else "") + (
+            "This conversation's project has uploaded files. Top level: " + top + ". Use the tools list_project_files, "
+            "read_project_file and search_project_files to read them instead of guessing. Documents (PDF, Word, Excel, "
+            "PowerPoint) are stored as '<name>.extracted.txt'. Cite the file name when you use its content.")
     return [{"role": "system", "content": system}] if system else []
 
 
@@ -250,6 +265,60 @@ def model_options(app):
     return {"num_ctx": app.cfg.context_tokens} if app.cfg.context_tokens else None
 
 
+MAX_TOOL_ROUNDS = 6
+
+
+def generate(app, ns, conv, model, msgs, think, stop):
+    """Yields ("chunk", Chunk) and ("tool", {"name", "label"}). Runs the model; if it asks to use
+    project-file tools, runs them (read-only, scoped to this project) and continues, up to MAX_TOOL_ROUNDS."""
+    pid = conv.get("project_id")
+    use_tools = bool(app.cfg.tools and pid and app.files.has_files(ns, pid))
+    work = list(msgs)
+    budget = max(4000, int((app.cfg.context_tokens or 32768) * 4 * 0.25))
+    for rnd in range(MAX_TOOL_ROUNDS + 1):
+        offer = tools_mod.SCHEMAS if use_tools and rnd < MAX_TOOL_ROUNDS else None
+        calls, text, gen = [], "", None
+        try:
+            try:
+                gen = app.backend().chat_stream(model, work, tools=offer, options=model_options(app), think=think)
+                for chunk in gen:
+                    if stop.is_set():
+                        return
+                    calls += chunk.tool_calls
+                    text += chunk.content
+                    yield ("chunk", chunk)
+            except backends.BackendError as e:
+                if offer and rnd == 0 and "tool" in str(e).lower():
+                    use_tools, offer = False, None   # this model cannot use tools; carry on without
+                    gen = app.backend().chat_stream(model, work, options=model_options(app), think=think)
+                    for chunk in gen:
+                        if stop.is_set():
+                            return
+                        yield ("chunk", chunk)
+                    return
+                raise
+        finally:
+            if gen is not None:
+                gen.close()
+        if not calls:
+            return
+        work.append({"role": "assistant", "content": text, "tool_calls": calls})
+        images = []
+        for c in calls:
+            result, img, label = tools_mod.run(app.files, ns, pid, c.get("name", ""), c.get("args"), budget)
+            result = result[:max(500, budget)]
+            budget -= len(result)
+            work.append({"role": "tool", "content": result, "tool_name": c.get("name", "")})
+            yield ("tool", {"name": c.get("name", ""), "label": label})
+            if img:
+                images.append(img)
+        if images:
+            work.append({"role": "user", "content": "(image requested from the project files)", "images": images})
+        if budget <= 0:
+            work.append({"role": "user", "content": "(file-reading budget used up; answer with what you have)"})
+            use_tools = False
+
+
 def _regenerate(h, st, ns, conv):
     if not conv["messages"] or conv["messages"][-1]["role"] != "assistant":
         return h._json(400, {"error": "nothing to regenerate -- last turn isn't an assistant reply"}) or True
@@ -263,9 +332,10 @@ def _regenerate(h, st, ns, conv):
     content, thinking = "", ""
     t0 = time.time()
     try:
-        for chunk in h.app.backend().chat_stream(model, msgs, options=model_options(h.app), think=h.app.cfg.think):
-            content += chunk.content
-            thinking += chunk.thinking
+        for kind, val in generate(h.app, ns, conv, model, msgs, h.app.cfg.think, threading.Event()):
+            if kind == "chunk":
+                content += val.content
+                thinking += val.thinking
     except backends.BackendError as e:
         h.app.telemetry.event("chat", action="regenerate", user=store.ns_for(h._identity().id), model=model,
                               status="error", error=str(e)[:200], total_ms=round((time.time() - t0) * 1000))
@@ -339,22 +409,15 @@ def _chat(h, st, ns, conv, body):
     stop = threading.Event()
 
     def pump():
-        gen = None
         try:
-            gen = h.app.backend().chat_stream(model, msgs, options=model_options(h.app), think=think)
-            for chunk in gen:
-                if stop.is_set():
-                    break
-                q.put(("chunk", chunk))
+            for item in generate(h.app, ns, conv, model, msgs, think, stop):
+                q.put(item)
             q.put(("end", None))
         except backends.BackendError as e:
             q.put(("error", str(e)))
         except Exception as e:
             sys.stderr.write("chat error: %r\n" % (e,))
             q.put(("error", "internal error"))
-        finally:
-            if gen is not None:
-                gen.close()
 
     threading.Thread(target=pump, daemon=True).start()
     h.send_response(200)
@@ -365,6 +428,7 @@ def _chat(h, st, ns, conv, body):
 
     gone = False
     content, thinking, error = "", "", None
+    tools_used = []
 
     def emit(obj):
         nonlocal gone
@@ -394,7 +458,10 @@ def _chat(h, st, ns, conv, body):
             if (val.thinking or val.content) and marks["first"] is None:
                 marks["first"] = time.time()
             if val.stats:
-                stats = val.stats
+                stats = {"prompt_tokens": val.stats.get("prompt_tokens") or stats.get("prompt_tokens"),
+                         "completion_tokens": (stats.get("completion_tokens") or 0) + (val.stats.get("completion_tokens") or 0),
+                         "eval_ms": (stats.get("eval_ms") or 0) + (val.stats.get("eval_ms") or 0),
+                         "load_ms": max(stats.get("load_ms") or 0, val.stats.get("load_ms") or 0)}
             if val.thinking:
                 thinking += val.thinking
                 emit({"type": "thinking_delta", "text": val.thinking})
@@ -405,6 +472,9 @@ def _chat(h, st, ns, conv, body):
                 emit({"type": "content_delta", "text": val.content})
             if gone:
                 break
+        elif kind == "tool":
+            tools_used.append(val)
+            emit({"type": "tool", "name": val["name"], "label": val["label"]})
         elif kind == "error":
             error = val
             break
@@ -417,6 +487,8 @@ def _chat(h, st, ns, conv, body):
         msg = {"role": "assistant", "content": content, "ts": ts}
         if thinking:
             msg["thinking"] = thinking
+        if tools_used:
+            msg["tools"] = tools_used
         conv["messages"].append(msg)
     conv["updated"] = ts
     st.save(ns, "conversations", conv)
@@ -430,7 +502,8 @@ def _chat(h, st, ns, conv, body):
         ctx_used=info["used"], ctx_limit=info["limit"], dropped=info["dropped"],
         prompt_tokens=stats.get("prompt_tokens"), completion_tokens=done_tokens, load_ms=stats.get("load_ms"),
         tok_per_s=round(done_tokens / (eval_ms / 1000), 1) if done_tokens and eval_ms else None,
-        out_chars=len(content), thinking_chars=len(thinking), images=len(images) or None)
+        out_chars=len(content), thinking_chars=len(thinking), images=len(images) or None,
+        tool_calls=len(tools_used) or None)
     if error:
         emit({"type": "error", "error": error})
     else:

@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import api, backends, config as cfgmod, store, telemetry
+from . import api, backends, config as cfgmod, files as filesmod, extract, store, telemetry
 from .auth_local import AuthError, Identity, LocalAuth
 
 STATIC = Path(__file__).parent / "static"
@@ -44,6 +44,7 @@ class App:
         self.local = None
         self.store = store.Store(cfg.data_path())
         self.telemetry = telemetry.Telemetry(cfg.log_path(), cfg.log_enabled)
+        self.files = filesmod.Files(cfg.data_path(), cfg.max_upload_bytes, cfg.user_quota_bytes)
         if cfg.auth.provider == "local":
             self.local = LocalAuth(str(cfg.data_path()))
         elif cfg.auth.provider != "none":
@@ -168,7 +169,8 @@ class Handler(BaseHTTPRequestHandler):
             out = {"authenticated": ident is not None, "mode": cfg.mode,
                    "provider": cfg.auth.provider, "needs_setup": self.app.needs_setup(),
                    "instance_name": cfg.instance_name, "model_choice": cfg.model_choice,
-                   "features": {"files": False}}
+                   "features": {"files": True, "tools": cfg.tools, "extract": extract.capabilities(),
+                                "max_upload_bytes": cfg.max_upload_bytes}}
             if ident:
                 first = (ident.name or "").split()
                 out.update(name=ident.name, email=ident.email, role=ident.role, id=ident.id,
@@ -178,14 +180,19 @@ class Handler(BaseHTTPRequestHandler):
             if not self._identity():
                 return self._json(401, {"error": "sign in required"})
             return self._models()
+        if filesmod.handle(self, "GET", path):
+            return
         if api.handle(self, "GET", path):
             return
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if not self._csrf_ok():
+        raw_chunk = path.startswith("/api/uploads/") and path.endswith("/chunk")
+        if not self._csrf_ok(need_json=not raw_chunk):
             return self._json(403, {"error": "request must be same-origin application/json"})
+        if filesmod.handle(self, "POST", path):
+            return
         if api.handle(self, "POST", path):
             return
         body = self._body()

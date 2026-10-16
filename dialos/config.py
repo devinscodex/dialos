@@ -52,7 +52,9 @@ class Config:
     model_allowlist: list = field(default_factory=list)
     default_model: str = ""
     model_choice: bool = True
-    max_upload_bytes: int = 2 * 1024**3
+    max_upload_bytes: int = 2 * 1024**3     # per file
+    user_quota_bytes: int = 20 * 1024**3    # per user, all projects
+    tools: bool = True                      # let the model read project files
     secure_cookies: bool = False
     context_tokens: int = 16384
     think: bool = True
@@ -91,6 +93,8 @@ def validate(cfg: Config) -> Config:
         raise ConfigError("mode=solo supports auth.provider = none or local")
     if cfg.bind not in LOOPBACK and cfg.auth.provider == "none":
         raise ConfigError("a non-loopback bind needs an auth provider")
+    if cfg.max_upload_bytes < 1 or cfg.user_quota_bytes < cfg.max_upload_bytes:
+        raise ConfigError("user_quota_bytes must be at least max_upload_bytes")
     if cfg.context_tokens != 0 and not 2048 <= cfg.context_tokens <= 2_000_000:
         raise ConfigError("context_tokens must be 0 (no fitting) or between 2048 and 2000000")
     if not cfg.model_choice and not cfg.default_model:

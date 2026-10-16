@@ -41,6 +41,21 @@ timings, token counts, model names and outcomes, never message text.
     python -m dialos.stats --days 7
     python -m dialos.stats --days 1 --raw 20
 
+## Files
+
+Attach files to a chat or upload them to a project (files and whole folders,
+drag and drop included). Uploads are sent in 8 MB chunks, so the per-file limit
+is only a disk limit (`max_upload_bytes`, default 2 GB) and each user has a
+total quota (`user_quota_bytes`, default 20 GB).
+
+- Text and code are stored as they are. Word, Excel and PowerPoint are read with
+  the standard library only. PDFs need `pdftotext` (poppler-utils); scanned
+  pages are read with OCR if `tesseract` is installed; old .doc/.xls/.ppt need
+  LibreOffice. Anything that can't be read is refused with the reason.
+- The model reads project files with read-only tools (list, read in pages,
+  search, look at an image), scoped to that project. Turn off with `tools = false`.
+- Images are checked by content and size, and pasted images go straight to the chat.
+
 ## Tests
 
     python -m unittest discover -s tests -t .

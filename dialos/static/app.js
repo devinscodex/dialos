@@ -51,6 +51,7 @@ let APP_NAME = 'Dialos';
       APP_NAME = me.instance_name || APP_NAME;
       document.title = APP_NAME;
       document.getElementById('brandName').textContent = APP_NAME;
+      window.DIALOS_FEATURES = me.features || {};
       if (!(me.features && me.features.files)) document.body.classList.add('no-files');
       if (!me.authenticated) { showLogin(); return; }
       if (me.provider !== 'none') {
@@ -154,7 +155,7 @@ function renderProjList() {
     row.title = p.name;
     const initial = (p.name.trim()[0] || '?').toUpperCase();
     row.innerHTML = `<span class="proj-icon" style="background:${projectColor(idx)}">${initial}</span><span class="projtitle">${p.name}</span>` +
-      (p.linked_folder ? `<span title="Has a linked folder" style="flex:none">📁</span>` : '') +
+      (p.has_files ? `<span title="Has uploaded files" style="flex:none">📁</span>` : '') +
       `<button class="convdel projsettingsbtn" title="Project settings">✎</button>`;
     row.addEventListener('click', (e) => {
       if (e.target.closest('.projsettingsbtn')) return; // handled separately below
@@ -173,81 +174,91 @@ let projSettingsCwd = '.';
 function renderProjSettingsFolderLabel(proj) {
   const pathEl = document.getElementById('projSettingsFolderPath');
   const clearBtn = document.getElementById('projSettingsClearBtn');
-  if (!proj.linked_folder) {
+  if (!proj.has_files) {
     pathEl.textContent = 'Nothing uploaded yet';
     clearBtn.style.display = 'none';
   } else {
-    pathEl.textContent = '📤 Uploaded snapshot from your device';
+    pathEl.textContent = '📤 Files uploaded from your device';
     clearBtn.style.display = '';
   }
 }
 
-async function readAndUploadFiles(projId, fileList) {
-  const MAX_FILE = 300_000, MAX_TOTAL = 100_000_000;
-  const DOC_EXTRACT_EXTS = ['.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt'];
-  const MAX_DOC_SOURCE = 50_000_000; // generous transport bound -- matches server.py's MAX_DOC_SOURCE_BYTES
-  const IMAGE_UPLOAD_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
-  const MAX_IMAGE_SOURCE = 50_000_000; // generous transport bound, pre-downscale -- matches server.py's MAX_IMAGE_UPLOAD_BYTES
-  function extOf(name) {
-    const i = name.lastIndexOf('.');
-    return i === -1 ? '' : name.slice(i).toLowerCase();
-  }
-  function bufToBase64(buf) {
-    let binary = '';
-    const bytes = new Uint8Array(buf);
-    const chunk = 0x8000; // real chunking -- String.fromCharCode.apply on
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+async function readAndUploadFiles(projId, fileList, onProgress) {
+  const SKIP_DIRS = ['node_modules/', '.git/', '__pycache__/', '.venv/', 'dist/', 'build/'];
+  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+  const extOf = (n) => { const i = n.lastIndexOf('.'); return i === -1 ? '' : n.slice(i).toLowerCase(); };
+  const maxBytes = (window.DIALOS_FEATURES && window.DIALOS_FEATURES.max_upload_bytes) || 2 * 1024 ** 3;
+  const written = [], problems = [];
+  const list = Array.from(fileList).filter((f) => {
+    const p = f.webkitRelativePath || f.name;
+    return !SKIP_DIRS.some((d) => p.includes('/' + d) || p.startsWith(d)) && !p.split('/').some((s) => s.startsWith('.'));
+  });
+  if (!list.length) return { ok: false, note: 'Nothing to upload in that pick (hidden and build folders are skipped).' };
+  const post = async (url, body) => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    return { status: r.status, data: await r.json().catch(() => ({})) };
+  };
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i];
+    let path = f.webkitRelativePath || f.name;
+    let blob = f;
+    if (IMAGE_EXTS.includes(extOf(f.name)) && f.size > 1_500_000) {
+      try {
+        const small = await downscaleImageIfNeeded(f);
+        if (small && small !== f) {
+          blob = small;
+          if (small.type === 'image/jpeg' && !/\.jpe?g$/i.test(path)) path = path.replace(/\.[^./]+$/, '') + '.jpg';
+        }
+      } catch (e) { /* keep the original */ }
     }
-    return btoa(binary);
-  }
-
-  const files = [];
-  let total = 0, skippedBinary = 0, skippedSize = 0;
-  for (const f of fileList) {
-    if (DOC_EXTRACT_EXTS.includes(extOf(f.name))) {
-      if (f.size > MAX_DOC_SOURCE) { skippedSize++; continue; }
-      let buf;
-      try { buf = await f.arrayBuffer(); } catch (e) { skippedBinary++; continue; }
-      files.push({ path: f.webkitRelativePath || f.name, content_b64: bufToBase64(buf) });
-      continue; // real size accounting happens server-side post-extraction, not here
+    if (blob.size > maxBytes) { problems.push(`${path}: over the ${Math.round(maxBytes / 2 ** 20)} MB file limit`); continue; }
+    if (onProgress) onProgress({ index: i + 1, total: list.length, name: f.name, sent: 0, size: blob.size });
+    const begin = await post(`/api/projects/${projId}/upload/begin`, { path, size: blob.size });
+    if (begin.status !== 200) {
+      problems.push(begin.data.error || `${path}: could not start upload`);
+      if (begin.status === 413 && /quota/.test(begin.data.error || '')) break;
+      continue;
     }
-    if (IMAGE_UPLOAD_EXTS.includes(extOf(f.name))) {
-      if (f.size > MAX_IMAGE_SOURCE) { skippedSize++; continue; }
-      let blob = f;
-      try { blob = await downscaleImageIfNeeded(f); } catch (e) { /* fall through with original */ }
-      let buf;
-      try { buf = await blob.arrayBuffer(); } catch (e) { skippedBinary++; continue; }
-      let destPath = f.webkitRelativePath || f.name;
-      if (blob !== f && blob.type === 'image/jpeg' && !/\.jpe?g$/i.test(destPath)) {
-        destPath = destPath.replace(/\.[^./]+$/, '') + '.jpg';
+    const uid = begin.data.upload_id, step = begin.data.chunk_bytes || 8 * 2 ** 20;
+    let off = 0, failed = false;
+    do {
+      const piece = blob.slice(off, off + step);
+      let resp;
+      try {
+        resp = await fetch(`/api/uploads/${uid}/chunk?offset=${off}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: piece });
+      } catch (e) { problems.push(`${path}: connection lost`); failed = true; break; }
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        problems.push(d.error || `${path}: upload failed`);
+        failed = true;
+        break;
       }
-      files.push({ path: destPath, content_b64: bufToBase64(buf) });
-      continue; // real validation (magic-byte + pixel-dim) happens server-side, not here
-    }
-    if (f.size > MAX_FILE) { skippedSize++; continue; }
-    if (total + f.size > MAX_TOTAL) { skippedSize++; continue; }
-    let text;
-    try { text = await f.text(); } catch (e) { skippedBinary++; continue; }
-    if (text.includes(String.fromCharCode(0))) { skippedBinary++; continue; }
-    total += f.size;
-    files.push({ path: f.webkitRelativePath || f.name, content: text });
+      off += piece.size;
+      if (onProgress) onProgress({ index: i + 1, total: list.length, name: f.name, sent: off, size: blob.size });
+    } while (off < blob.size);
+    if (failed) { await post(`/api/uploads/${uid}/abort`); continue; }
+    const fin = await post(`/api/uploads/${uid}/finish`);
+    if (fin.status !== 200) { problems.push(fin.data.error || `${path}: could not be read`); continue; }
+    written.push(...fin.data.written_paths);
+    (fin.data.notes || []).forEach((n) => problems.push(n));
   }
-  if (!files.length) {
-    return { ok: false, note: 'Nothing uploadable in that pick (binaries/too-large files are skipped).' };
-  }
-  try {
-    const resp = await fetch(`/api/projects/${projId}/upload`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files }),
-    });
-    const data = await resp.json();
-    if (data.error) return { ok: false, note: 'Error: ' + data.error };
-    const skippedTotal = skippedBinary + skippedSize + (data.skipped || 0);
-    return { ok: true, written: data.written, skipped: skippedTotal, notes: data.notes, writtenPaths: data.written_paths };
-  } catch (e) {
-    return { ok: false, note: 'Could not reach the server.' };
-  }
+  if (!written.length) return { ok: false, note: problems.length ? problems.slice(0, 3).join(' \u00b7 ') : 'Nothing was uploaded.' };
+  return { ok: true, written: written.length, skipped: list.length - written.length, notes: problems, writtenPaths: written };
+}
+
+function uploadProgressText(el) {
+  return (p) => {
+    const pct = p.size ? Math.floor((p.sent / p.size) * 100) : 100;
+    el.textContent = `Uploading ${p.index}/${p.total}: ${p.name}${p.size > 2 ** 20 ? ' (' + pct + '%)' : ''}`;
+  };
+}
+
+function uploadSummary(r) {
+  let t = `Uploaded ${r.written} file${r.written === 1 ? '' : 's'}.`;
+  if (r.skipped) t += ` ${r.skipped} skipped.`;
+  if (r.notes && r.notes.length) t += ' ' + r.notes.slice(0, 3).join(' \u00b7 ') + (r.notes.length > 3 ? ` (+${r.notes.length - 3} more)` : '');
+  return t;
 }
 
 async function uploadFileList(fileList) {
@@ -255,11 +266,9 @@ async function uploadFileList(fileList) {
   const status = document.getElementById('projSettingsUploadStatus');
   if (!fileList.length) return;
   status.textContent = `Reading ${fileList.length} file(s)…`;
-  const result = await readAndUploadFiles(projId, fileList);
+  const result = await readAndUploadFiles(projId, fileList, uploadProgressText(status));
   if (!result.ok) { status.textContent = result.note; return; }
-  const skippedNote = result.skipped
-    ? ` (${result.skipped} skipped -- binary or over the size cap)` : '';
-  status.textContent = `Uploaded ${result.written} file(s).${skippedNote}`;
+  status.textContent = uploadSummary(result);
   const projResp = await fetch(`/api/projects/${projId}`);
   const proj = await projResp.json();
   renderProjSettingsFolderLabel(proj);
@@ -999,7 +1008,8 @@ async function loadConversation(id) {
       showHero();
     } else {
       for (const m of conv.messages) {
-        addMessage(m.role === 'user' ? myDisplayName() : APP_NAME, m.role, m.content, null, m.thinking, m.images, m.ts);
+        const el = addMessage(m.role === 'user' ? myDisplayName() : APP_NAME, m.role, m.content, null, m.thinking, m.images, m.ts);
+        (m.tools || []).forEach((t) => addToolChip(el, t));
       }
     }
     renderConvList();
@@ -1105,8 +1115,8 @@ async function sendMessage() {
           pending.dataset.rawText = rawContent;
           pending.querySelector('.bubble').innerHTML = renderMarkdown(rawContent);
           messagesEl.scrollTop = messagesEl.scrollHeight;
-        } else if (evt.type === 'tool_call') {
-          recordToolCalls([{ name: evt.name, args: evt.args, output: evt.output }]);
+        } else if (evt.type === 'tool') {
+          addToolChip(pending, evt);
         } else if (evt.type === 'done') {
           updateCtxMeter(evt.context);
           const whoEl = pending.querySelector('.who');
@@ -1216,15 +1226,14 @@ async function attachFilesToChat(fileList) {
   }
 
   hint.textContent = `Reading ${fileList.length} file(s)…`;
-  const result = await readAndUploadFiles(projId, fileList);
+  const result = await readAndUploadFiles(projId, fileList, uploadProgressText(hint));
   if (!result.ok) {
     hint.textContent = result.note;
     setTimeout(() => { hint.textContent = origHint; }, 5000);
     return;
   }
-  const skippedNote = result.skipped ? ` (${result.skipped} skipped)` : '';
-  hint.textContent = `Attached ${result.written} file(s) to the current project.${skippedNote}`;
-  setTimeout(() => { hint.textContent = origHint; }, 5000);
+  hint.textContent = uploadSummary(result);
+  setTimeout(() => { hint.textContent = origHint; }, 9000);
 
   const filenames = result.writtenPaths && result.writtenPaths.length
     ? result.writtenPaths
@@ -1277,7 +1286,20 @@ if (chatDropZone) {
   });
 }
 
-function recordToolCalls() {}
+function addToolChip(msgEl, t) {
+  if (!msgEl) return;
+  let box = msgEl.querySelector('.tool-chips');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'tool-chips';
+    msgEl.querySelector('.bubble').before(box);
+  }
+  const verbs = { list_project_files: 'Listed', read_project_file: 'Read', search_project_files: 'Searched for', read_project_image: 'Looked at' };
+  const chip = document.createElement('span');
+  chip.className = 'tool-chip';
+  chip.textContent = '\ud83d\udcc4 ' + (verbs[t.name] || t.name) + ' ' + (t.label || '');
+  box.appendChild(chip);
+}
 
 async function exportAllConversations() {
   const full = [];
