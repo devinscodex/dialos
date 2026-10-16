@@ -7,6 +7,7 @@ data_dir = "~/.local/share/dialos"
 # system_prompt = ""
 # model_allowlist = []        # empty = every model the backend reports
 # default_model = ""
+# model_choice = true         # false: users cannot pick; default_model is always used
 # max_upload_bytes = 2147483648
 # secure_cookies = true       # set when served over https (reverse proxy / tunnel)
 

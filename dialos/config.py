@@ -51,6 +51,7 @@ class Config:
     system_prompt: str = ""
     model_allowlist: list = field(default_factory=list)
     default_model: str = ""
+    model_choice: bool = True
     max_upload_bytes: int = 2 * 1024**3
     secure_cookies: bool = False
     auth: Auth = field(default_factory=Auth)
@@ -83,6 +84,8 @@ def validate(cfg: Config) -> Config:
         raise ConfigError("mode=solo supports auth.provider = none or local")
     if cfg.bind not in LOOPBACK and cfg.auth.provider == "none":
         raise ConfigError("a non-loopback bind needs an auth provider")
+    if not cfg.model_choice and not cfg.default_model:
+        raise ConfigError("model_choice = false requires default_model")
     if cfg.auth.provider == "oidc" and not (cfg.auth.oidc_issuer and cfg.auth.oidc_client_id):
         raise ConfigError("auth.provider=oidc needs oidc_issuer and oidc_client_id")
     if cfg.auth.provider == "proxy" and not cfg.auth.proxy_trusted_ips:

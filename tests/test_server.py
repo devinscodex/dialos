@@ -147,7 +147,10 @@ class ServerTests(unittest.TestCase):
         c = self._login(srv, app)
         s, r, t = c.req("POST", "/api/chat", {"model": "m1", "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual((s, r.getheader("Content-Type")), (200, "text/event-stream"))
+        self.assertEqual(r.getheader("X-Accel-Buffering"), "no")
         events = [json.loads(l[6:]) for l in t.split("\n\n") if l.startswith("data: ")]
+        self.assertEqual(events[0], {"status": "loading"})
+        events = [e for e in events if "content" in e]
         self.assertEqual("".join(e["content"] for e in events), "Hello")
         self.assertEqual("".join(e["thinking"] for e in events), "hm")
         self.assertTrue(events[-1]["done"])
@@ -164,14 +167,27 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(c.json("POST", "/api/chat", {"model": "", "messages": good})[0], 400)
         self.assertEqual(c.json("GET", "/api/models")[1]["models"], ["m1"])
 
-    def test_backend_error_is_502(self):
+    def test_backend_error_arrives_as_stream_event(self):
         fb = FakeBackend()
         fb.fail = True
         srv, app = start(multi_cfg(), fb)
         self.addCleanup(stop, srv)
         c = self._login(srv, app)
-        s, d = c.json("POST", "/api/chat", {"model": "m1", "messages": [{"role": "user", "content": "hi"}]})
-        self.assertEqual((s, d["error"]), (502, "backend down"))
+        s, r, t = c.req("POST", "/api/chat", {"model": "m1", "messages": [{"role": "user", "content": "hi"}]})
+        events = [json.loads(l[6:]) for l in t.split("\n\n") if l.startswith("data: ")]
+        self.assertEqual(s, 200)
+        self.assertEqual(events[0], {"status": "loading"})
+        self.assertEqual((events[-1]["error"], events[-1]["done"]), ("backend down", True))
+
+    def test_model_choice_off_forces_default_and_hides_list(self):
+        fb = FakeBackend()
+        srv, app = start(multi_cfg(default_model="m2", model_choice=False), fb)
+        self.addCleanup(stop, srv)
+        c = self._login(srv, app)
+        self.assertFalse(c.json("GET", "/api/me")[1]["model_choice"])
+        self.assertEqual(c.json("GET", "/api/models")[1]["models"], ["m2"])
+        c.req("POST", "/api/chat", {"model": "secret", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(fb.calls[-1][0], "m2")
 
     def test_body_limit_and_bad_json(self):
         srv, _ = start(multi_cfg())

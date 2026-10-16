@@ -2,31 +2,40 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>Dialos</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='14' r='7' fill='%236fb59f'/%3E%3Ccircle cx='32' cy='34' r='11' fill='%236fb59f'/%3E%3Crect x='14' y='46' width='36' height='12' rx='6' fill='%236fb59f'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header><strong id="brand">Dialos</strong><span id="who"></span><button id="logout" hidden>Sign out</button></header>
+<header>
+  <strong id="brand">Dialos</strong>
+  <span class="grow"></span>
+  <span id="who"></span>
+  <button id="newChat" class="ghost" hidden>New chat</button>
+  <button id="logout" class="ghost" hidden>Sign out</button>
+</header>
 
 <main id="auth" hidden>
   <form id="authForm">
     <h2 id="authTitle">Sign in</h2>
-    <input id="u" placeholder="Username" autocomplete="username" required>
+    <input id="u" placeholder="Username" autocomplete="username" autocapitalize="none" required>
     <input id="p" type="password" placeholder="Password" autocomplete="current-password" required>
     <button type="submit" id="authBtn">Sign in</button>
-    <p id="authErr" class="err"></p>
+    <p id="authErr" class="err" role="alert"></p>
   </form>
 </main>
 
 <main id="chat" hidden>
-  <div class="bar"><select id="model"></select></div>
-  <div id="log"></div>
+  <div class="bar" id="modelBar" hidden><select id="model" aria-label="Model"></select></div>
+  <div id="log" aria-live="polite"></div>
+  <p id="chatErr" class="err" role="alert"></p>
   <form id="send">
-    <textarea id="box" rows="2" placeholder="Message"></textarea>
-    <button type="submit">Send</button>
+    <textarea id="box" rows="1" placeholder="Message" aria-label="Message"></textarea>
+    <button type="submit" id="sendBtn">Send</button>
+    <button type="button" id="stopBtn" class="stop" hidden>Stop</button>
   </form>
-  <p id="chatErr" class="err"></p>
 </main>
 
 <script src="/static/app.js"></script>

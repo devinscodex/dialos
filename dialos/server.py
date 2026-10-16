@@ -12,6 +12,7 @@ Security model:
 import argparse
 import json
 import os
+import queue
 import re
 import sys
 import threading
@@ -161,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = self.app.cfg
             out = {"authenticated": ident is not None, "mode": cfg.mode,
                    "provider": cfg.auth.provider, "needs_setup": self.app.needs_setup(),
-                   "instance_name": cfg.instance_name}
+                   "instance_name": cfg.instance_name, "model_choice": cfg.model_choice}
             if ident:
                 out.update(name=ident.name, email=ident.email, role=ident.role, id=ident.id)
             return self._json(200, out)
@@ -218,11 +219,14 @@ class Handler(BaseHTTPRequestHandler):
         return [n for n in names if n in allow] if allow else list(names)
 
     def _models(self):
+        cfg = self.app.cfg
+        if not cfg.model_choice:
+            return self._json(200, {"models": [cfg.default_model], "default": cfg.default_model})
         try:
             names = self._allowed(self.app.backend().list_models())
         except backends.BackendError as e:
             return self._json(502, {"error": str(e)})
-        self._json(200, {"models": names, "default": self.app.cfg.default_model})
+        self._json(200, {"models": names, "default": cfg.default_model})
 
     def _clean_messages(self, raw):
         if not isinstance(raw, list) or not raw:
@@ -244,38 +248,67 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _chat(self, body):
-        model = body.get("model")
+        cfg = self.app.cfg
+        model = body.get("model") if cfg.model_choice else cfg.default_model
         msgs = self._clean_messages(body.get("messages"))
-        allow = self.app.cfg.model_allowlist
+        allow = cfg.model_allowlist
         if not isinstance(model, str) or not model or msgs is None or (allow and model not in allow):
             return self._json(400, {"error": "invalid model or messages"})
-        if self.app.cfg.system_prompt:
-            msgs = [{"role": "system", "content": self.app.cfg.system_prompt}] + msgs
-        try:
-            stream = self.app.backend().chat_stream(model, msgs, think=bool(body.get("think")))
-            first = next(stream, None)
-        except backends.BackendError as e:
-            return self._json(502, {"error": str(e)})
+        if cfg.system_prompt:
+            msgs = [{"role": "system", "content": cfg.system_prompt}] + msgs
+        think = bool(body.get("think"))
+        q = queue.Queue()
+        stop = threading.Event()
+
+        def pump():
+            gen = None
+            try:
+                gen = self.app.backend().chat_stream(model, msgs, think=think)
+                for chunk in gen:
+                    if stop.is_set():
+                        break
+                    q.put(("chunk", chunk))
+                q.put(("end", None))
+            except backends.BackendError as e:
+                q.put(("error", str(e)))
+            except Exception as e:
+                sys.stderr.write("chat error: %r\n" % (e,))
+                q.put(("error", "internal error"))
+            finally:
+                if gen is not None:
+                    gen.close()
+
+        threading.Thread(target=pump, daemon=True).start()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        self.send_header("X-Accel-Buffering", "no")
         self._headers_common()
         self.end_headers()
+
+        def emit(obj):
+            self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
+            self.wfile.flush()
         try:
-            def emit(obj):
-                self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
-                self.wfile.flush()
-            chunk = first
-            while chunk is not None:
-                emit({"content": chunk.content, "thinking": chunk.thinking,
-                      "tool_calls": chunk.tool_calls, "done": chunk.done})
-                chunk = next(stream, None)
-        except backends.BackendError as e:
-            try:
-                emit({"error": str(e), "done": True})
-            except OSError:
-                pass
-        except (BrokenPipeError, ConnectionResetError):
+            emit({"status": "loading"})
+            while True:
+                try:
+                    kind, val = q.get(timeout=10)
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                if kind == "chunk":
+                    emit({"content": val.content, "thinking": val.thinking,
+                          "tool_calls": val.tool_calls, "done": val.done})
+                elif kind == "error":
+                    emit({"error": val, "done": True})
+                    break
+                else:
+                    break
+        except OSError:
             pass
+        finally:
+            stop.set()
 
 
 def make_server(cfg, backend=None):

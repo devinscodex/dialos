@@ -47,6 +47,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.load(write('[auth]\nprovdier = "local"\n'))
 
+    def test_model_choice_off_needs_default(self):
+        with self.assertRaises(config.ConfigError):
+            config.load(write('model_choice = false\n'))
+        c = config.load(write('model_choice = false\ndefault_model = "m"\n'))
+        self.assertFalse(c.model_choice)
+
     def test_bad_mode(self):
         with self.assertRaises(config.ConfigError):
             config.load(write('mode = "team"\n'))
