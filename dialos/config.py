@@ -1,0 +1,104 @@
+"""Dialos configuration: one TOML file, validated at startup.
+
+mode = "solo"   one person, loopback by default, no login.
+mode = "multi"  several people; refuses to start without a real auth provider.
+
+auth.provider:
+  none    solo only.
+  local   built-in accounts (scrypt password hashes in the data dir).
+  oidc    any OpenID Connect issuer (Keycloak, Authentik, Zitadel, Entra, ...).
+  proxy   identity asserted by a trusted reverse proxy (header or signed JWT).
+"""
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+MODES = ("solo", "multi")
+PROVIDERS = ("none", "local", "oidc", "proxy")
+BACKENDS = ("auto", "ollama", "openai")
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
+class ConfigError(ValueError):
+    pass
+
+
+@dataclass
+class Auth:
+    provider: str = "none"
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret_env: str = "DIALOS_OIDC_SECRET"
+    proxy_header: str = "X-Forwarded-Email"
+    proxy_trusted_ips: list = field(default_factory=lambda: ["127.0.0.1"])
+    allow_signup: bool = False
+
+
+@dataclass
+class Backend:
+    kind: str = "auto"
+    url: str = "http://127.0.0.1:11434"
+    api_key_env: str = ""
+
+
+@dataclass
+class Config:
+    mode: str = "solo"
+    instance_name: str = "Dialos"
+    bind: str = "127.0.0.1"
+    port: int = 8420
+    data_dir: str = "~/.local/share/dialos"
+    system_prompt: str = ""
+    model_allowlist: list = field(default_factory=list)
+    default_model: str = ""
+    max_upload_bytes: int = 2 * 1024**3
+    auth: Auth = field(default_factory=Auth)
+    backend: Backend = field(default_factory=Backend)
+
+    def data_path(self) -> Path:
+        return Path(self.data_dir).expanduser()
+
+
+def _section(raw: dict, name: str, cls):
+    sec = raw.get(name, {})
+    unknown = set(sec) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"unknown keys in [{name}]: {sorted(unknown)}")
+    return cls(**sec)
+
+
+def validate(cfg: Config) -> Config:
+    if cfg.mode not in MODES:
+        raise ConfigError(f"mode must be one of {MODES}, got {cfg.mode!r}")
+    if cfg.auth.provider not in PROVIDERS:
+        raise ConfigError(f"auth.provider must be one of {PROVIDERS}")
+    if cfg.backend.kind not in BACKENDS:
+        raise ConfigError(f"backend.kind must be one of {BACKENDS}")
+    if not 1 <= cfg.port <= 65535:
+        raise ConfigError("port out of range")
+    if cfg.mode == "multi" and cfg.auth.provider == "none":
+        raise ConfigError("mode=multi requires auth.provider = local, oidc or proxy")
+    if cfg.mode == "solo" and cfg.auth.provider not in ("none", "local"):
+        raise ConfigError("mode=solo supports auth.provider = none or local")
+    if cfg.bind not in LOOPBACK and cfg.auth.provider == "none":
+        raise ConfigError("a non-loopback bind needs an auth provider")
+    if cfg.auth.provider == "oidc" and not (cfg.auth.oidc_issuer and cfg.auth.oidc_client_id):
+        raise ConfigError("auth.provider=oidc needs oidc_issuer and oidc_client_id")
+    if cfg.auth.provider == "proxy" and not cfg.auth.proxy_trusted_ips:
+        raise ConfigError("auth.provider=proxy needs proxy_trusted_ips")
+    return cfg
+
+
+def load(path=None) -> Config:
+    raw = {}
+    if path:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    top = {k: v for k, v in raw.items() if k not in ("auth", "backend")}
+    unknown = set(top) - set(Config.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"unknown top-level keys: {sorted(unknown)}")
+    cfg = Config(**top)
+    cfg.auth = _section(raw, "auth", Auth)
+    cfg.backend = _section(raw, "backend", Backend)
+    return validate(cfg)

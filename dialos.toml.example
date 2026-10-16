@@ -1,0 +1,24 @@
+# Copy to dialos.toml and edit.
+mode = "solo"                 # "solo" or "multi"
+instance_name = "Dialos"
+bind = "127.0.0.1"
+port = 8420
+data_dir = "~/.local/share/dialos"
+# system_prompt = ""
+# model_allowlist = []        # empty = every model the backend reports
+# default_model = ""
+# max_upload_bytes = 2147483648
+
+[auth]
+provider = "none"             # none | local | oidc | proxy
+# oidc_issuer = "https://login.example.com"
+# oidc_client_id = ""
+# oidc_client_secret_env = "DIALOS_OIDC_SECRET"
+# proxy_header = "X-Forwarded-Email"
+# proxy_trusted_ips = ["127.0.0.1"]
+# allow_signup = false
+
+[backend]
+kind = "auto"                 # auto | ollama | openai
+url = "http://127.0.0.1:11434"
+# api_key_env = ""
