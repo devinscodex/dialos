@@ -55,6 +55,9 @@ class Config:
     max_upload_bytes: int = 2 * 1024**3     # per file
     user_quota_bytes: int = 20 * 1024**3    # per user, all projects
     chunk_bytes: int = 512 * 1024           # upload piece size; must fit the reverse proxy's body limit (nginx default 1 MB)
+    web: bool = False                       # allow web search/page fetch (users still switch it on per chat)
+    search_url: str = ""                    # optional SearXNG base URL (preferred over DuckDuckGo)
+    obscura_path: str = ""                  # optional Obscura binary, fallback when DuckDuckGo blocks plain requests
     tools: bool = True                      # let the model read project files
     secure_cookies: bool = False
     context_tokens: int = 16384

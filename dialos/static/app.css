@@ -407,3 +407,6 @@ body.no-files #chatAttachBtn, body.no-files .files-feature, body.no-files .drop-
 .tool-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
 .tool-chip { font-size: .76rem; color: var(--ink-soft); background: var(--bg-2); border: 1px solid var(--line, #333);
   border-radius: 999px; padding: 2px 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.webbtn.on { color: var(--ink); background: rgba(var(--moss), .25); border-radius: 6px; }
+.webbtn.on::after { content: ""; }

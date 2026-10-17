@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 
-from . import backends, context, store, tools as tools_mod
+from . import backends, context, store, tools as tools_mod, web as web_mod
 
 MAX_MESSAGE = 200_000
 MAX_IMAGES = 4
@@ -234,6 +234,8 @@ def system_messages(app, st, ns, conv):
             "This conversation's project has uploaded files. Top level: " + top + ". Use the tools list_project_files, "
             "read_project_file and search_project_files to read them instead of guessing. Documents (PDF, Word, Excel, "
             "PowerPoint) are stored as '<name>.extracted.txt'. Cite the file name when you use its content.")
+    if conv.get("web") and app.cfg.web:
+        system = (system + "\n\n" if system else "") + web_mod.WEB_NOTE
     return [{"role": "system", "content": system}] if system else []
 
 
@@ -268,15 +270,46 @@ def model_options(app):
 MAX_TOOL_ROUNDS = 6
 
 
+def run_web(app, ns, name, args):
+    """(result_text, None, label). Logs counts and provider only, never the query or URL."""
+    args = args if isinstance(args, dict) else {}
+    if not (app.cfg.web):
+        return "error: web access is turned off", None, ""
+    try:
+        if name == "web_search":
+            q = str(args.get("query") or "")
+            res, provider = web_mod.search(app.cfg, q, args.get("max_results") or 5)
+            app.telemetry.event("web", user=ns, tool="search", provider=provider, results=len(res))
+            if not res:
+                return "no results", None, q[:60]
+            return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['snippet']}" for r in res), None, q[:60]
+        url = str(args.get("url") or "")
+        text = web_mod.fetch_page(url, args.get("offset") or 0)
+        app.telemetry.event("web", user=ns, tool="fetch", chars=len(text))
+        return text, None, urlparse_host(url)
+    except web_mod.WebError as e:
+        app.telemetry.event("web", user=ns, tool=name, error=str(e)[:80])
+        return f"error: {e}", None, str(args.get("query") or args.get("url") or "")[:60]
+    except (ValueError, TypeError):
+        return "error: invalid arguments", None, ""
+
+
+def urlparse_host(url):
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or url)[:60]
+
+
 def generate(app, ns, conv, model, msgs, think, stop):
     """Yields ("chunk", Chunk) and ("tool", {"name", "label"}). Runs the model; if it asks to use
     project-file tools, runs them (read-only, scoped to this project) and continues, up to MAX_TOOL_ROUNDS."""
     pid = conv.get("project_id")
-    use_tools = bool(app.cfg.tools and pid and app.files.has_files(ns, pid))
+    use_files = bool(app.cfg.tools and pid and app.files.has_files(ns, pid))
+    use_web = bool(app.cfg.web and conv.get("web"))
+    use_tools = use_files or use_web
     work = list(msgs)
     budget = max(4000, int((app.cfg.context_tokens or 32768) * 4 * 0.25))
     for rnd in range(MAX_TOOL_ROUNDS + 1):
-        offer = tools_mod.SCHEMAS if use_tools and rnd < MAX_TOOL_ROUNDS else None
+        offer = ((tools_mod.SCHEMAS if use_files else []) + (web_mod.SCHEMAS if use_web else [])) if use_tools and rnd < MAX_TOOL_ROUNDS else None
         calls, text, gen = [], "", None
         try:
             try:
@@ -305,7 +338,10 @@ def generate(app, ns, conv, model, msgs, think, stop):
         work.append({"role": "assistant", "content": text, "tool_calls": calls})
         images = []
         for c in calls:
-            result, img, label = tools_mod.run(app.files, ns, pid, c.get("name", ""), c.get("args"), budget)
+            if c.get("name") in ("web_search", "fetch_page"):
+                result, img, label = run_web(app, ns, c.get("name"), c.get("args"))
+            else:
+                result, img, label = tools_mod.run(app.files, ns, pid, c.get("name", ""), c.get("args"), budget)
             result = result[:max(500, budget)]
             budget -= len(result)
             work.append({"role": "tool", "content": result, "tool_name": c.get("name", "")})
@@ -388,6 +424,8 @@ def _chat(h, st, ns, conv, body):
     if not isinstance(model, str) or not model or (cfg.model_allowlist and model not in cfg.model_allowlist):
         return h._json(400, {"error": "invalid model"}) or True
 
+    if "web" in body:
+        conv["web"] = bool(body["web"]) and cfg.web
     conv["model"] = model
     if conv["title"] == "New chat":
         conv["title"] = auto_title(text)

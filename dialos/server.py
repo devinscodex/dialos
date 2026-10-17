@@ -169,7 +169,7 @@ class Handler(BaseHTTPRequestHandler):
             out = {"authenticated": ident is not None, "mode": cfg.mode,
                    "provider": cfg.auth.provider, "needs_setup": self.app.needs_setup(),
                    "instance_name": cfg.instance_name, "model_choice": cfg.model_choice,
-                   "features": {"files": True, "tools": cfg.tools, "extract": extract.capabilities(),
+                   "features": {"files": True, "tools": cfg.tools, "web": cfg.web, "extract": extract.capabilities(),
                                 "max_upload_bytes": cfg.max_upload_bytes}}
             if ident:
                 first = (ident.name or "").split()
