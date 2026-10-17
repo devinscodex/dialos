@@ -70,6 +70,24 @@ class ExtractTests(unittest.TestCase):
         self.assertIn("Item\t\t99", text)
         self.assertIn("Pumps\t1250.5", text)
 
+    def test_epub_in_reading_order(self):
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w") as z:
+            z.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+                       '<rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+            z.writestr("OEBPS/content.opf", '<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                       '<metadata><dc:title>Pump Manual</dc:title></metadata><manifest>'
+                       '<item id="a" href="ch1.xhtml"/><item id="b" href="text/ch2.xhtml"/><item id="c" href="cover.jpg"/></manifest>'
+                       '<spine><itemref idref="b"/><itemref idref="a"/></spine></package>')
+            z.writestr("OEBPS/ch1.xhtml", "<html><head><title>x</title></head><body><h1>One</h1><p>First chapter &amp; text</p></body></html>")
+            z.writestr("OEBPS/text/ch2.xhtml", "<html><body><p>Second chapter</p><script>bad()</script></body></html>")
+        text, _ = extract.extract("book.epub", b.getvalue())
+        self.assertIn("# Pump Manual", text)
+        self.assertLess(text.index("Second chapter"), text.index("First chapter & text"))
+        self.assertNotIn("bad()", text)
+        with self.assertRaisesRegex(ValueError, "damaged|valid EPUB"):
+            extract.extract("x.epub", b"junk")
+
     def test_pptx(self):
         text, _ = extract.extract("c.pptx", make_pptx())
         self.assertIn("## Slide 1\nKickoff plan", text)

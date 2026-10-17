@@ -48,7 +48,7 @@ drag and drop included). Uploads are sent in 8 MB chunks, so the per-file limit
 is only a disk limit (`max_upload_bytes`, default 2 GB) and each user has a
 total quota (`user_quota_bytes`, default 20 GB).
 
-- Text and code are stored as they are. Word, Excel and PowerPoint are read with
+- Text and code are stored as they are. Word, Excel, PowerPoint and EPUB are read with
   the standard library only. PDFs need `pdftotext` (poppler-utils); scanned
   pages are read with OCR if `tesseract` is installed; old .doc/.xls/.ppt need
   LibreOffice. Anything that can't be read is refused with the reason.

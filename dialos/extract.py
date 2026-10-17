@@ -9,6 +9,7 @@ the rest, detected at runtime:
 extract() returns (text, notes). Notes say plainly what could not be read.
 """
 import io
+import posixpath
 import re
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import zipfile
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from pathlib import Path
 
 MAX_PART_BYTES = 200 * 1024 * 1024   # decompressed size cap per XML part
@@ -33,7 +35,7 @@ TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".xm
              ".cs", ".java", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".ps1", ".psm1", ".bat", ".sql", ".css",
              ".scss", ".lua", ".r", ".swift", ".kt", ".tex", ".rst", ".eml", ".srt", ".vtt", ".diff", ".patch", ".env",
              ".gitignore", ".dockerfile", ".makefile", ".tf", ".bicep", ".gradle", ".properties"}
-OOXML_EXTS = {".docx", ".xlsx", ".pptx"}
+OOXML_EXTS = {".docx", ".xlsx", ".pptx", ".epub"}
 LEGACY_EXTS = {".doc", ".xls", ".ppt", ".rtf", ".odt", ".ods", ".odp"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
@@ -195,6 +197,67 @@ def extract_pptx(raw: bytes):
     return "\n".join(out), ["pictures and charts are not described"]
 
 
+# ---------------------------------------------------------------- EPUB
+class _Text(HTMLParser):
+    BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "section", "pre"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.skip, self.title = [], 0, ""
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "head"):
+            self.skip += 1
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "head"):
+            self.skip = max(0, self.skip - 1)
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(data)
+
+
+def extract_epub(raw: bytes):
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        names = set(z.namelist())
+        if "META-INF/container.xml" not in names:
+            raise ValueError("not a valid EPUB (no container.xml)")
+        cont = ET.fromstring(_read_part(z, "META-INF/container.xml"))
+        opf_path = next((e.get("full-path") for e in cont.iter() if _t(e.tag) == "rootfile"), None)
+        if not opf_path or opf_path not in names:
+            raise ValueError("not a valid EPUB (package file missing)")
+        opf = ET.fromstring(_read_part(z, opf_path))
+        base = posixpath.dirname(opf_path)
+        manifest = {e.get("id"): e.get("href") for e in opf.iter() if _t(e.tag) == "item"}
+        title = next(((e.text or "").strip() for e in opf.iter() if _t(e.tag) == "title"), "")
+        order = [e.get("idref") for e in opf.iter() if _t(e.tag) == "itemref"]
+        if not order:
+            order = list(manifest)
+        out, notes = ([f"# {title}", ""] if title else []), []
+        chapters = 0
+        for idref in order:
+            href = manifest.get(idref)
+            if not href or not href.lower().split("#")[0].endswith((".xhtml", ".html", ".htm", ".xml")):
+                continue
+            path = posixpath.normpath(posixpath.join(base, href.split("#")[0].replace("%20", " ")))
+            if path not in names:
+                continue
+            parser = _Text()
+            parser.feed(_read_part(z, path).decode("utf-8", "replace"))
+            text = re.sub(r"\n\s*\n+", "\n\n", "".join(parser.out)).strip()
+            if text:
+                chapters += 1
+                out.append(f"## Section {chapters}\n{text}\n")
+        if not chapters:
+            notes.append("no readable text was found (it may be image-based or DRM-protected)")
+    return "\n".join(out), notes + ["images are not described"]
+
+
 # ---------------------------------------------------------------- PDF
 def _page_thin(text: str) -> bool:
     s = text.strip()
@@ -288,7 +351,7 @@ def extract(name: str, raw: bytes):
                 raise ValueError("this looks like a binary file, not text")
             return raw.decode("utf-8", "replace"), []
         if kind == "ooxml":
-            return {".docx": extract_docx, ".xlsx": extract_xlsx, ".pptx": extract_pptx}[ext](raw)
+            return {".docx": extract_docx, ".xlsx": extract_xlsx, ".pptx": extract_pptx, ".epub": extract_epub}[ext](raw)
         if kind == "pdf":
             return extract_pdf(raw)
         if kind == "legacy":
