@@ -54,6 +54,7 @@ class Config:
     model_choice: bool = True
     max_upload_bytes: int = 2 * 1024**3     # per file
     user_quota_bytes: int = 20 * 1024**3    # per user, all projects
+    chunk_bytes: int = 512 * 1024           # upload piece size; must fit the reverse proxy's body limit (nginx default 1 MB)
     tools: bool = True                      # let the model read project files
     secure_cookies: bool = False
     context_tokens: int = 16384
@@ -93,6 +94,8 @@ def validate(cfg: Config) -> Config:
         raise ConfigError("mode=solo supports auth.provider = none or local")
     if cfg.bind not in LOOPBACK and cfg.auth.provider == "none":
         raise ConfigError("a non-loopback bind needs an auth provider")
+    if not 16 * 1024 <= cfg.chunk_bytes <= 16 * 1024 * 1024:
+        raise ConfigError("chunk_bytes must be between 16384 and 16777216")
     if cfg.max_upload_bytes < 1 or cfg.user_quota_bytes < cfg.max_upload_bytes:
         raise ConfigError("user_quota_bytes must be at least max_upload_bytes")
     if cfg.context_tokens != 0 and not 2048 <= cfg.context_tokens <= 2_000_000:

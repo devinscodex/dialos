@@ -347,7 +347,7 @@ def handle(h, method, path):
             if body is None:
                 return True
             uid = fl.begin(ns, pid, body.get("path"), body.get("size"))
-            h._json(200, {"upload_id": uid, "chunk_bytes": 8 * 1024 * 1024})
+            h._json(200, {"upload_id": uid, "chunk_bytes": h.app.cfg.chunk_bytes})
         elif m_step and method == "POST":
             uid, step = m_step.groups()
             if step == "chunk":

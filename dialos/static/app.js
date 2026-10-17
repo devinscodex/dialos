@@ -230,7 +230,7 @@ async function readAndUploadFiles(projId, fileList, onProgress) {
       } catch (e) { problems.push(`${path}: connection lost`); failed = true; break; }
       if (!resp.ok) {
         const d = await resp.json().catch(() => ({}));
-        problems.push(d.error || `${path}: upload failed`);
+        problems.push(d.error || (resp.status === 413 ? `${path}: the web server in front of Dialos rejected a ${Math.round(piece.size / 1024)} KB piece (its body limit is too low)` : `${path}: upload failed (HTTP ${resp.status})`));
         failed = true;
         break;
       }

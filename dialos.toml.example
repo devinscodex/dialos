@@ -11,6 +11,7 @@ data_dir = "~/.local/share/dialos"
 # max_upload_bytes = 2147483648
 # max_upload_bytes = 2147483648    # per file (uploads are chunked, so this is only a disk limit)
 # user_quota_bytes = 21474836480   # per user, across all projects
+# chunk_bytes = 524288             # upload piece size; keep below the proxy's body limit (nginx default is 1 MB)
 # tools = true                     # let the model list/read/search a project's files
 # context_tokens = 16384      # the model's window; history is fitted to ~75% of it (0 = send everything)
 # think = true                # ask models to show reasoning
