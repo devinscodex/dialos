@@ -61,7 +61,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual([m["role"] for m in conv["messages"]], ["user", "assistant"])
         self.assertEqual((conv["messages"][1]["content"], conv["messages"][1]["thinking"]), ("Hello", "hm"))
         sent = self.fb.calls[-1][1]
-        self.assertEqual(sent[0], {"role": "system", "content": "Base."})
+        self.assertEqual(sent[0]["role"], "system")
+        self.assertTrue(sent[0]["content"].startswith("Base."))
         self.assertEqual(sent[-1]["content"], "What is up\nsecond line")
 
     def test_history_is_sent_on_followup(self):

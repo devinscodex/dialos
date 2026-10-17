@@ -218,8 +218,37 @@ def _projects(h, method, proj_id, action):
     return True
 
 
+def capability_block(app, ns, conv, model_name):
+    tools = []
+    pid = conv.get("project_id")
+    if app.cfg.tools and pid and app.files.has_files(ns, pid):
+        tools += ["list_project_files", "read_project_file", "search_project_files", "read_project_image",
+                  "crop_image", "image_metadata"]
+    if conv.get("web") and app.cfg.web:
+        tools += ["web_search", "fetch_page"]
+    lines = [f"About this deployment: you are the model \"{model_name}\", running locally through Dialos"
+             + (f" on {app.cfg.host_note}" if app.cfg.host_note else "")
+             + ". You are not running in a vendor cloud, and you should not describe infrastructure you cannot know.",
+             "Tools available in this conversation: " + (", ".join(tools) if tools else "none") + ".",
+             "Rules: (1) If a request needs a tool you do not have (for example web search or reverse image search), "
+             "say so in one line, give what you can from what you can actually see, and stop; do not guess your way "
+             "around the gap. (2) Label every guess as a guess with a confidence (low/medium/high); never present an "
+             "unverified identification as a finding. (3) A file's name is evidence: read it literally before "
+             "brainstorming. (4) Keep reasoning short and proportionate to the question."]
+    if pid and "read_project_image" in tools:
+        lines.append("(5) For any question about an uploaded image, look at it with read_project_image first; use crop_image "
+                     "to zoom on small details such as text, logos and signs, and image_metadata for camera, date and GPS data.")
+    if "web_search" in tools:
+        lines.append("(6) To identify something unknown, build specific search queries from what you see (visible text, "
+                     "distinctive features, the file name), and if the first search fails, try a different query. "
+                     "Open the best result with fetch_page and cite the URL you relied on.")
+    return "\n".join(lines)
+
+
 def system_messages(app, st, ns, conv):
     system = app.cfg.system_prompt
+    model_name = conv.get("model") or app.cfg.default_model or "a local model"
+    system = (system + "\n\n" if system else "") + capability_block(app, ns, conv, model_name)
     if conv.get("project_id"):
         try:
             instr = st.load(ns, "projects", conv["project_id"]).get("instructions", "")
@@ -249,6 +278,24 @@ def build_messages(app, st, ns, conv, history):
         if m.get("images"):
             mm["images"] = [i["data"] for i in m["images"]]
         plain.append(mm)
+    pid = conv.get("project_id")
+    if pid and plain and plain[-1]["role"] == "user":
+        seen = []
+        for m in reversed(history):
+            for pth in m.get("viewed") or []:
+                if pth not in seen:
+                    seen.append(pth)
+        again = []
+        for pth in seen[:2]:
+            try:
+                data, _ = tools_mod.image_b64(app.files, ns, pid, pth)
+            except Exception:
+                continue
+            again.append((pth, data))
+        if again:
+            plain[-1] = dict(plain[-1], images=(plain[-1].get("images") or []) + [d for _, d in again],
+                             content=plain[-1]["content"] + "\n\n(Images you viewed earlier are attached again: "
+                             + ", ".join(p for p, _ in again) + ")")
     fitted = context.fit(sysm, plain, app.cfg.context_tokens)
     if fitted is None:
         return None, None
@@ -299,7 +346,7 @@ def urlparse_host(url):
     return (urlparse(url).hostname or url)[:60]
 
 
-def generate(app, ns, conv, model, msgs, think, stop):
+def generate(app, ns, conv, model, msgs, think, stop, viewed=None):
     """Yields ("chunk", Chunk) and ("tool", {"name", "label"}). Runs the model; if it asks to use
     project-file tools, runs them (read-only, scoped to this project) and continues, up to MAX_TOOL_ROUNDS."""
     pid = conv.get("project_id")
@@ -314,12 +361,29 @@ def generate(app, ns, conv, model, msgs, think, stop):
         try:
             try:
                 gen = app.backend().chat_stream(model, work, tools=offer, options=model_options(app), think=think)
+                think_chars, capped = 0, False
                 for chunk in gen:
                     if stop.is_set():
                         return
                     calls += chunk.tool_calls
                     text += chunk.content
+                    think_chars += len(chunk.thinking)
                     yield ("chunk", chunk)
+                    cap = app.cfg.max_thinking_chars
+                    if think and cap and think_chars > cap and not text and not calls:
+                        capped = True
+                        break
+                if capped:
+                    gen.close()
+                    yield ("note", "thinking_cap")
+                    work.append({"role": "user", "content": "(Time limit on reasoning reached. Answer now using only what you "
+                                 "already know and can see. State clearly what is a guess and what you could not check.)"})
+                    gen = app.backend().chat_stream(model, work, tools=None, options=model_options(app), think=False)
+                    for chunk in gen:
+                        if stop.is_set():
+                            return
+                        yield ("chunk", chunk)
+                    return
             except backends.BackendError as e:
                 if offer and rnd == 0 and "tool" in str(e).lower():
                     use_tools, offer = False, None   # this model cannot use tools; carry on without
@@ -348,6 +412,8 @@ def generate(app, ns, conv, model, msgs, think, stop):
             yield ("tool", {"name": c.get("name", ""), "label": label})
             if img:
                 images.append(img)
+                if viewed is not None and label not in viewed:
+                    viewed.append(label)
         if images:
             work.append({"role": "user", "content": "(image requested from the project files)", "images": images})
         if budget <= 0:
@@ -442,13 +508,14 @@ def _chat(h, st, ns, conv, body):
     marks = {"first": None, "content": None}
     stats = {}
     think = h.app.cfg.think
+    viewed, capped = [], False
 
     q = queue.Queue()
     stop = threading.Event()
 
     def pump():
         try:
-            for item in generate(h.app, ns, conv, model, msgs, think, stop):
+            for item in generate(h.app, ns, conv, model, msgs, think, stop, viewed):
                 q.put(item)
             q.put(("end", None))
         except backends.BackendError as e:
@@ -510,6 +577,9 @@ def _chat(h, st, ns, conv, body):
                 emit({"type": "content_delta", "text": val.content})
             if gone:
                 break
+        elif kind == "note":
+            capped = True
+            emit({"type": "note", "text": "Reasoning hit its time limit, so the model was told to answer with what it has."})
         elif kind == "tool":
             tools_used.append(val)
             emit({"type": "tool", "name": val["name"], "label": val["label"]})
@@ -527,6 +597,8 @@ def _chat(h, st, ns, conv, body):
             msg["thinking"] = thinking
         if tools_used:
             msg["tools"] = tools_used
+        if viewed:
+            msg["viewed"] = viewed
         conv["messages"].append(msg)
     conv["updated"] = ts
     st.save(ns, "conversations", conv)
@@ -541,7 +613,7 @@ def _chat(h, st, ns, conv, body):
         prompt_tokens=stats.get("prompt_tokens"), completion_tokens=done_tokens, load_ms=stats.get("load_ms"),
         tok_per_s=round(done_tokens / (eval_ms / 1000), 1) if done_tokens and eval_ms else None,
         out_chars=len(content), thinking_chars=len(thinking), images=len(images) or None,
-        tool_calls=len(tools_used) or None)
+        tool_calls=len(tools_used) or None, thinking_capped=capped or None)
     if error:
         emit({"type": "error", "error": error})
     else:

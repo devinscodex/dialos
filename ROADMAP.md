@@ -27,6 +27,8 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
 - [x] Chunked uploads (no 50 MB ceiling), per-user quota, PDF/Word/Excel/PowerPoint extraction, optional OCR
 - [x] Model tools to list, read, search and view project files
 - [x] Web search and page fetch (per-chat switch, DuckDuckGo, optional SearXNG/Obscura, private-network guard)
+- [x] Image tools for the model: look, crop/zoom, metadata (camera, date, GPS); viewed images stay attached on later turns
+- [x] Capability-aware system prompt and a reasoning-time cap
 - [ ] Resumable uploads after a dropped connection; browser local-folder connection
 
 ## Operations

@@ -58,6 +58,8 @@ class Config:
     web: bool = False                       # allow web search/page fetch (users still switch it on per chat)
     search_url: str = ""                    # optional SearXNG base URL (preferred over DuckDuckGo)
     obscura_path: str = ""                  # optional Obscura binary, fallback when DuckDuckGo blocks plain requests
+    host_note: str = ""                    # one line about where this runs, e.g. "a single 24 GB GPU in the owner's home"
+    max_thinking_chars: int = 12000         # stop endless reasoning and make the model answer (0 = no cap)
     tools: bool = True                      # let the model read project files
     secure_cookies: bool = False
     context_tokens: int = 16384

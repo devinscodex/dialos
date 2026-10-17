@@ -52,7 +52,7 @@ let APP_NAME = 'Dialos';
       document.title = APP_NAME;
       document.getElementById('brandName').textContent = APP_NAME;
       window.DIALOS_FEATURES = me.features || {};
-      setWeb(webOn);
+      initWebSetting();
       if (!(me.features && me.features.files)) document.body.classList.add('no-files');
       if (!me.authenticated) { showLogin(); return; }
       if (me.provider !== 'none') {
@@ -981,18 +981,15 @@ if (inputBox) {
   });
 }
 
-let webOn = false;
 function webAvailable() { return !!(window.DIALOS_FEATURES && window.DIALOS_FEATURES.web); }
-function setWeb(on) {
-  webOn = !!on && webAvailable();
-  const b = document.getElementById('chatWebBtn');
-  if (!b) return;
-  b.style.display = webAvailable() ? '' : 'none';
-  b.classList.toggle('on', webOn);
-  b.title = webOn ? 'Web search is ON for this chat: your questions may be sent to a search site. Click to turn off.'
-                  : 'Let the model search the web in this chat (off)';
+function webOn() { return webAvailable() && localStorage.getItem('dialos-web') === '1'; }
+function initWebSetting() {
+  const row = document.getElementById('webSettingRow'), box = document.getElementById('webSearchSetting');
+  if (!row || !box) return;
+  row.style.display = webAvailable() ? '' : 'none';
+  box.checked = webOn();
+  box.onchange = () => localStorage.setItem('dialos-web', box.checked ? '1' : '0');
 }
-document.getElementById('chatWebBtn').addEventListener('click', () => setWeb(!webOn));
 
 function updateCtxMeter(c) {
   const el = document.getElementById('ctxMeter');
@@ -1015,7 +1012,6 @@ async function loadConversation(id) {
     if (!resp.ok) return;
     const conv = await resp.json();
     currentConvId = conv.id;
-    setWeb(!!conv.web);
     currentProjectId = conv.project_id || null;
     updateCtxMeter(conv.context);
     messagesEl.innerHTML = '';
@@ -1034,7 +1030,6 @@ async function loadConversation(id) {
 }
 
 async function startNewChat() {
-  setWeb(false);
   updateCtxMeter(null);
   currentConvId = null;
   messagesEl.innerHTML = '';
@@ -1073,7 +1068,7 @@ async function sendMessage() {
     }
 
     const chatBody = { message: text };
-    if (webAvailable()) chatBody.web = webOn;
+    if (webAvailable()) chatBody.web = webOn();
     if (model) chatBody.model = model;
     if (imagesToSend.length) chatBody.images = imagesToSend;
     const resp = await fetch(`/api/conversations/${currentConvId}/chat`, {
@@ -1132,6 +1127,12 @@ async function sendMessage() {
           pending.dataset.rawText = rawContent;
           pending.querySelector('.bubble').innerHTML = renderMarkdown(rawContent);
           messagesEl.scrollTop = messagesEl.scrollHeight;
+        } else if (evt.type === 'note') {
+          const n = document.createElement('div');
+          n.className = 'tool-chips';
+          n.innerHTML = '<span class="tool-chip"></span>';
+          n.firstChild.textContent = '\u23f1 ' + evt.text;
+          pending.querySelector('.bubble').before(n);
         } else if (evt.type === 'tool') {
           addToolChip(pending, evt);
         } else if (evt.type === 'done') {
@@ -1311,7 +1312,7 @@ function addToolChip(msgEl, t) {
     box.className = 'tool-chips';
     msgEl.querySelector('.bubble').before(box);
   }
-  const verbs = { web_search: 'Searched the web for', fetch_page: 'Opened', list_project_files: 'Listed', read_project_file: 'Read', search_project_files: 'Searched for', read_project_image: 'Looked at' };
+  const verbs = { crop_image: 'Zoomed into', image_metadata: 'Read metadata of', web_search: 'Searched the web for', fetch_page: 'Opened', list_project_files: 'Listed', read_project_file: 'Read', search_project_files: 'Searched for', read_project_image: 'Looked at' };
   const chip = document.createElement('span');
   chip.className = 'tool-chip';
   chip.textContent = '\ud83d\udcc4 ' + (verbs[t.name] || t.name) + ' ' + (t.label || '');

@@ -114,7 +114,6 @@
     <div class="pending-images" id="pendingImages" style="display:none"></div>
     <div class="inputrow">
       <button class="attachbtn" id="chatAttachBtn" title="Attach a local file">📎</button>
-      <button class="attachbtn webbtn" id="chatWebBtn" title="Let the model search the web in this chat (off)" style="display:none">🌐</button>
       <input type="file" id="chatAttachInput" multiple style="display:none">
       <textarea id="inputBox" rows="1" placeholder="Message…"></textarea>
       <button class="sendbtn" id="sendBtn">↑</button>
@@ -143,6 +142,7 @@
     <div class="settings-section">
       <h4>Chat</h4>
       
+      <div class="settings-row web-feature" id="webSettingRow" style="display:none"><span>Web search<div class="desc">Let the model search the web and open pages. Your question text is sent to a search site (DuckDuckGo) when it does. Off by default</div></span><input type="checkbox" id="webSearchSetting"></div>
       <div class="settings-row"><span>Auto-expand thinking<div class="desc">Show the model's reasoning expanded by default. It can always be collapsed per message</div></span><input type="checkbox" id="autoExpandThinking"></div>
     </div>
 

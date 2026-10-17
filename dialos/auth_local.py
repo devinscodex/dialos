@@ -39,6 +39,11 @@ class Identity:
     name: str
     email: str = ""
     role: str = "user"
+    must_change: bool = False
+
+
+def temp_password() -> str:
+    return "-".join(secrets.token_hex(2) for _ in range(4))
 
 
 def _hash(password: str, salt: bytes) -> bytes:
@@ -61,6 +66,12 @@ class LocalAuth:
             CREATE TABLE IF NOT EXISTS fails(
               username TEXT PRIMARY KEY, count INTEGER NOT NULL, since REAL NOT NULL);
         """)
+        cols = [r[1] for r in self.db.execute("PRAGMA table_info(users)")]
+        if "must_change" not in cols:
+            self.db.execute("ALTER TABLE users ADD COLUMN must_change INTEGER NOT NULL DEFAULT 0")
+        if "last_login" not in cols:
+            self.db.execute("ALTER TABLE users ADD COLUMN last_login REAL")
+        self.db.commit()
         os.chmod(os.path.join(data_dir, "auth.db"), 0o600)
 
     @_sync
@@ -68,7 +79,7 @@ class LocalAuth:
         return self.db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
 
     @_sync
-    def create_user(self, username, password, name="", email="", role="user") -> Identity:
+    def create_user(self, username, password, name="", email="", role="user", must_change=False) -> Identity:
         username = username.strip().lower()
         if not username or len(username) > 64:
             raise AuthError("invalid username")
@@ -82,12 +93,12 @@ class LocalAuth:
         salt = os.urandom(16)
         try:
             self.db.execute(
-                "INSERT INTO users(id,username,name,email,role,salt,pwhash,created) VALUES(?,?,?,?,?,?,?,?)",
-                (uid, username, name or username, email, role, salt, _hash(password, salt), time.time()))
+                "INSERT INTO users(id,username,name,email,role,salt,pwhash,created,must_change) VALUES(?,?,?,?,?,?,?,?,?)",
+                (uid, username, name or username, email, role, salt, _hash(password, salt), time.time(), 1 if must_change else 0))
             self.db.commit()
         except sqlite3.IntegrityError:
             raise AuthError("username taken")
-        return Identity(uid, name or username, email, role)
+        return Identity(uid, name or username, email, role, must_change)
 
     def _locked(self, username) -> bool:
         row = self.db.execute("SELECT count, since FROM fails WHERE username=?", (username,)).fetchone()
@@ -113,6 +124,7 @@ class LocalAuth:
             self.db.commit()
             raise AuthError("invalid username or password")
         self.db.execute("DELETE FROM fails WHERE username=?", (username,))
+        self.db.execute("UPDATE users SET last_login=? WHERE id=?", (time.time(), row[0]))
         token = secrets.token_urlsafe(32)
         self.db.execute("INSERT INTO sessions VALUES(?,?,?)",
                         (hashlib.sha256(token.encode()).hexdigest(), row[0], time.time() + SESSION_TTL))
@@ -124,13 +136,13 @@ class LocalAuth:
         if not token:
             return None
         row = self.db.execute(
-            "SELECT u.id,u.name,u.email,u.role,s.expires FROM sessions s JOIN users u ON u.id=s.user_id "
+            "SELECT u.id,u.name,u.email,u.role,s.expires,u.must_change FROM sessions s JOIN users u ON u.id=s.user_id "
             "WHERE s.tokhash=?", (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
         if not row or row[4] < time.time():
             return None
         if self.db.execute("SELECT disabled FROM users WHERE id=?", (row[0],)).fetchone()[0]:
             return None
-        return Identity(row[0], row[1], row[2], row[3])
+        return Identity(row[0], row[1], row[2], row[3], bool(row[5]))
 
     @_sync
     def id_map(self) -> dict:
@@ -138,8 +150,9 @@ class LocalAuth:
 
     @_sync
     def list_users(self) -> list:
-        return [dict(zip(("username", "name", "email", "role", "disabled"), r)) for r in self.db.execute(
-            "SELECT username, name, email, role, disabled FROM users ORDER BY created")]
+        return [dict(zip(("username", "name", "email", "role", "disabled", "created", "last_login", "must_change"), r))
+                for r in self.db.execute(
+                    "SELECT username, name, email, role, disabled, created, last_login, must_change FROM users ORDER BY created")]
 
     def _admins(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND disabled=0").fetchone()[0]
@@ -152,12 +165,12 @@ class LocalAuth:
         return row
 
     @_sync
-    def set_password(self, username, password):
+    def set_password(self, username, password, must_change=False):
         if len(password) < MIN_PASSWORD:
             raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
         uid = self._get(username)[0]
         salt = os.urandom(16)
-        self.db.execute("UPDATE users SET salt=?, pwhash=? WHERE id=?", (salt, _hash(password, salt), uid))
+        self.db.execute("UPDATE users SET salt=?, pwhash=?, must_change=? WHERE id=?", (salt, _hash(password, salt), 1 if must_change else 0, uid))
         self.db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         self.db.execute("DELETE FROM fails WHERE username=?", (username.strip().lower(),))
         self.db.commit()
@@ -189,6 +202,21 @@ class LocalAuth:
             raise AuthError("cannot delete the last admin")
         self.db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         self.db.execute("DELETE FROM users WHERE id=?", (uid,))
+        self.db.commit()
+
+    @_sync
+    def change_password(self, user_id, current, new, keep_token):
+        row = self.db.execute("SELECT username, salt, pwhash FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row or not hmac.compare_digest(_hash(current, row[1]), row[2]):
+            raise AuthError("current password is wrong")
+        if len(new) < MIN_PASSWORD:
+            raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
+        if new == current:
+            raise AuthError("choose a different password")
+        salt = os.urandom(16)
+        self.db.execute("UPDATE users SET salt=?, pwhash=?, must_change=0 WHERE id=?", (salt, _hash(new, salt), user_id))
+        self.db.execute("DELETE FROM sessions WHERE user_id=? AND tokhash<>?",
+                        (user_id, hashlib.sha256(keep_token.encode()).hexdigest()))
         self.db.commit()
 
     @_sync

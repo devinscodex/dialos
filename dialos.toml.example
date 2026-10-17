@@ -15,6 +15,8 @@ data_dir = "~/.local/share/dialos"
 # web = false                      # let users switch on web search + page fetch per chat
 # search_url = ""                  # SearXNG base URL (JSON output enabled); otherwise DuckDuckGo is used
 # obscura_path = ""                # optional stealth browser fallback
+# host_note = "a single 24 GB GPU"   # told to the model so it answers questions about its own hosting truthfully
+# max_thinking_chars = 12000       # after this much reasoning with no answer, the model is told to answer now (0 = off)
 # tools = true                     # let the model list/read/search a project's files
 # context_tokens = 16384      # the model's window; history is fitted to ~75% of it (0 = send everything)
 # think = true                # ask models to show reasoning
