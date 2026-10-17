@@ -1130,7 +1130,7 @@ async function sendMessage() {
           messagesEl.scrollTop = messagesEl.scrollHeight;
         } else if (evt.type === 'note') {
           const n = document.createElement('div');
-          n.className = 'tool-chips keep';
+          n.className = 'tool-chips';
           n.innerHTML = '<span class="tool-chip"></span>';
           n.firstChild.textContent = '\u23f1 ' + evt.text;
           pending.querySelector('.bubble').before(n);
