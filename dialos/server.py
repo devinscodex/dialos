@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import api, backends, config as cfgmod, files as filesmod, extract, store, telemetry
+from . import admin, api, backends, config as cfgmod, files as filesmod, extract, store, telemetry
 from .auth_local import AuthError, Identity, LocalAuth
 
 STATIC = Path(__file__).parent / "static"
@@ -103,6 +103,30 @@ class Handler(BaseHTTPRequestHandler):
             return SOLO_USER
         return self.app.local.identify(self._token())
 
+    def _must_change(self, path):
+        """True (and answers 403) if this person must set their own password before doing anything else."""
+        if not path.startswith("/api/") or path in ("/api/me", "/api/password", "/api/logout", "/api/login", "/api/setup", "/api/health"):
+            return False
+        ident = self._identity()
+        if ident and ident.must_change:
+            self._json(403, {"error": "choose your own password first", "must_change": True})
+            return True
+        return False
+
+    def _password(self):
+        ident = self._identity()
+        if not ident or not self.app.local:
+            return self._json(401, {"error": "sign in required"})
+        body = self._body()
+        if body is None:
+            return
+        try:
+            self.app.local.change_password(ident.id, str(body.get("current", "")), str(body.get("new", "")), self._token())
+        except AuthError as e:
+            return self._json(400, {"error": str(e)})
+        self.app.telemetry.event("auth", action="password_changed", user_ns=store.ns_for(ident.id), **self._peer())
+        self._json(200, {"ok": True})
+
     def _peer(self):
         return {"peer": self.client_address[0], "xff": (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip() or None}
 
@@ -173,13 +197,17 @@ class Handler(BaseHTTPRequestHandler):
                                 "max_upload_bytes": cfg.max_upload_bytes}}
             if ident:
                 first = (ident.name or "").split()
-                out.update(name=ident.name, email=ident.email, role=ident.role, id=ident.id,
+                out.update(must_change=ident.must_change, name=ident.name, email=ident.email, role=ident.role, id=ident.id,
                            display_name=first[0] if first else ident.name)
             return self._json(200, out)
         if path == "/api/models":
             if not self._identity():
                 return self._json(401, {"error": "sign in required"})
             return self._models()
+        if self._must_change(path):
+            return
+        if admin.handle(self, "GET", path):
+            return
         if filesmod.handle(self, "GET", path):
             return
         if api.handle(self, "GET", path):
@@ -191,6 +219,12 @@ class Handler(BaseHTTPRequestHandler):
         raw_chunk = path.startswith("/api/uploads/") and path.endswith("/chunk")
         if not self._csrf_ok(need_json=not raw_chunk):
             return self._json(403, {"error": "request must be same-origin application/json"})
+        if path == "/api/password":
+            return self._password()
+        if self._must_change(path):
+            return
+        if admin.handle(self, "POST", path):
+            return
         if filesmod.handle(self, "POST", path):
             return
         if api.handle(self, "POST", path):

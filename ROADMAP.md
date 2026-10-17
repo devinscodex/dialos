@@ -29,6 +29,7 @@ Status key: [x] done, [ ] planned. Order within a section is rough priority.
 - [x] Web search and page fetch (per-chat switch, DuckDuckGo, optional SearXNG/Obscura, private-network guard)
 - [x] Image tools for the model: look, crop/zoom, metadata (camera, date, GPS); viewed images stay attached on later turns
 - [x] Capability-aware system prompt and a reasoning-time cap
+- [x] Admin People page: let people in with a temporary password, reset, disable, promote, remove
 - [ ] Resumable uploads after a dropped connection; browser local-folder connection
 
 ## Operations

@@ -41,6 +41,14 @@ timings, token counts, model names and outcomes, never message text.
     python -m dialos.stats --days 7
     python -m dialos.stats --days 1 --raw 20
 
+## People
+
+The first account created in the browser is the admin. Admins get a People section
+in Settings: let someone in (you get a one-time temporary password to pass on),
+reset a password, disable, promote or remove. People with a temporary password must
+choose their own before doing anything else. The `dialos.cli` command does the same
+from a terminal.
+
 ## Files
 
 Attach files to a chat or upload them to a project (files and whole folders,

@@ -51,6 +51,7 @@ let APP_NAME = 'Dialos';
       APP_NAME = me.instance_name || APP_NAME;
       document.title = APP_NAME;
       document.getElementById('brandName').textContent = APP_NAME;
+      window.DIALOS_ME = me;
       window.DIALOS_FEATURES = me.features || {};
       initWebSetting();
       if (!(me.features && me.features.files)) document.body.classList.add('no-files');

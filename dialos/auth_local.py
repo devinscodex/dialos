@@ -7,6 +7,7 @@ stored. Login attempts are throttled per username.
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -81,8 +82,8 @@ class LocalAuth:
     @_sync
     def create_user(self, username, password, name="", email="", role="user", must_change=False) -> Identity:
         username = username.strip().lower()
-        if not username or len(username) > 64:
-            raise AuthError("invalid username")
+        if not re.fullmatch(r"[a-z0-9._-]{1,64}", username):
+            raise AuthError("usernames may use letters, numbers, dot, dash and underscore only")
         if len(password) < MIN_PASSWORD:
             raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
         if role not in ("user", "admin"):
